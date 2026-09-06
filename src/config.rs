@@ -361,7 +361,8 @@ fn check_sun_path(p: &Path) -> Result<(), ConfigError> {
     let len = p.as_os_str().as_encoded_bytes().len();
     if len > SUN_PATH_MAX {
         return Err(ConfigError::Invalid(format!(
-            "socket path is {len} bytes, over the {SUN_PATH_MAX} a UNIX socket allows: {}",
+            "socket path is {len} bytes, over rash's {SUN_PATH_MAX}-byte limit \
+             (the kernel's sun_path holds 104 on macOS, 108 on Linux): {}",
             p.display()
         )));
     }

@@ -236,6 +236,23 @@ async fn the_remote_socket_path_is_new_on_every_start() {
 }
 
 #[tokio::test]
+async fn the_unix_sockets_are_removed_on_exit() {
+    let dir = SockDir::new("cleanup");
+    let cfg = config_with("unix", &[("RASH_SOCKET_DIR", dir.as_str())]);
+    let u = cfg.unix.clone().expect("unix paths");
+
+    let monitor = Monitor::bind(&cfg).await.expect("bind the monitor");
+    assert!(u.local_in.exists(), "the listener should exist while bound");
+
+    // Without this the directory accumulates a dead socket per run for ever.
+    drop(monitor);
+    assert!(
+        !u.local_in.exists(),
+        "the listener socket must be removed on exit"
+    );
+}
+
+#[tokio::test]
 async fn a_disabled_monitor_is_never_probed() {
     let cfg = config_for("0", "60");
     let monitor = Monitor::bind(&cfg).await.expect("bind the monitor");

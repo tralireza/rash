@@ -215,6 +215,23 @@ impl Monitor {
     }
 }
 
+impl Drop for Monitor {
+    /// Take the sockets away on the way out.
+    ///
+    /// Binding already unlinks a stale file, so a leftover cannot break the next
+    /// run — but without this the directory accumulates a dead pair per run,
+    /// indefinitely. The pid file has the same guard, and the same limitation:
+    /// a process killed with SIGKILL runs no destructors, so the next bind's
+    /// unlink is still the thing that guarantees correctness.
+    fn drop(&mut self) {
+        if let Some(u) = &self.unix {
+            let _ = fs::remove_file(&u.local_in);
+            // ssh owns this one, but it does not always outlive us to clean up.
+            let _ = fs::remove_file(&u.local_out);
+        }
+    }
+}
+
 /// Create the socket's directory if it is missing, readable by nobody else.
 ///
 /// Only a directory rash creates is re-permissioned; an existing one is left

@@ -480,7 +480,11 @@ fn an_over_long_socket_path_is_rejected_up_front() {
     let long = format!("/tmp/{}", "x".repeat(120));
     match try_resolve(&["-M", "unix", "host"], &[("RASH_SOCKET_DIR", &long)]) {
         Err(ConfigError::Invalid(m)) => {
-            assert!(m.contains("UNIX socket allows"), "got {m:?}")
+            assert!(m.contains("sun_path"), "got {m:?}");
+            assert!(
+                m.contains("145 bytes"),
+                "should name the actual size: {m:?}"
+            );
         }
         other => panic!("expected a rejection, got {other:?}"),
     }
