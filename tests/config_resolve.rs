@@ -478,12 +478,19 @@ fn an_over_long_socket_path_is_rejected_up_front() {
     // sun_path is ~104 bytes. Left to bind() this surfaces as a baffling error
     // from inside the socket layer, so it is caught while resolving instead.
     let long = format!("/tmp/{}", "x".repeat(120));
+
+    // Computed rather than hardcoded: the socket name carries the pid, so the
+    // length depends on how many digits it has. A literal passes on a machine
+    // that has been up a while and fails on a freshly booted one, where pids
+    // are still short.
+    let expected = format!("{long}/rash-{}-out.sock", std::process::id()).len();
+
     match try_resolve(&["-M", "unix", "host"], &[("RASH_SOCKET_DIR", &long)]) {
         Err(ConfigError::Invalid(m)) => {
             assert!(m.contains("sun_path"), "got {m:?}");
             assert!(
-                m.contains("145 bytes"),
-                "should name the actual size: {m:?}"
+                m.contains(&format!("{expected} bytes")),
+                "should name the actual size ({expected}): {m:?}"
             );
         }
         other => panic!("expected a rejection, got {other:?}"),
