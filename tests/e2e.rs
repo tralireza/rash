@@ -156,12 +156,27 @@ impl Running {
 }
 
 impl Drop for Running {
-    /// A panicking test must not leave a supervisor behind.
+    /// A test must leave neither a supervisor nor an ssh behind.
+    ///
+    /// SIGTERM first, and only then SIGKILL. Going straight to `Child::kill`,
+    /// which is SIGKILL, gives rash no chance to reap its own child, so the
+    /// fake ssh is reparented to init and sleeps for ever holding its ports.
     fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+        if !matches!(self.child.try_wait(), Ok(None)) {
+            return;
         }
+
+        self.signal(libc::SIGTERM);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -228,7 +243,7 @@ fn the_json_log_sink_emits_one_object_per_line() {
 fn a_healthy_tunnel_is_left_alone() {
     let port = free_even_port();
     let s = Scratch::new("healthy");
-    let r = Rash::new(&s)
+    let mut r = Rash::new(&s)
         // A 1s poll gives a 500ms net timeout, so several probes run quickly.
         .env("AUTOSSH_POLL", "1")
         .args(&["-M", &port.to_string(), "-N", "host"])
@@ -241,6 +256,7 @@ fn a_healthy_tunnel_is_left_alone() {
     assert_eq!(r.starts(), 1, "a working tunnel must not be restarted");
 
     r.signal(libc::SIGTERM);
+    r.wait_for_exit();
 }
 
 #[test]

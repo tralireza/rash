@@ -28,6 +28,7 @@ use std::thread;
 use std::time::Duration;
 
 fn main() {
+    exit_when_orphaned();
     let start = record_start();
     start_tunnel();
 
@@ -166,6 +167,26 @@ fn exit_code_for(start: usize) -> i32 {
         return 0;
     }
     codes[(start - 1).min(codes.len() - 1)]
+}
+
+/// Stop as soon as the supervisor goes away.
+///
+/// A test that has to resort to SIGKILL leaves rash no chance to reap this
+/// process, so it is reparented to init and — in `sleep` mode — holds its
+/// forward's ports until the machine is rebooted. Nothing here is worth
+/// outliving its parent, and there is no portable `PR_SET_PDEATHSIG`, so poll.
+fn exit_when_orphaned() {
+    // SAFETY: getppid takes no arguments and only reads the calling process.
+    let parent = unsafe { libc::getppid() };
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_millis(250));
+            // SAFETY: as above.
+            if unsafe { libc::getppid() } != parent {
+                std::process::exit(0);
+            }
+        }
+    });
 }
 
 fn ignore_sigterm() {
