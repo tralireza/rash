@@ -1,3 +1,5 @@
+[![CI](https://github.com/tralireza/rash/actions/workflows/ci.yml/badge.svg)](https://github.com/tralireza/rash/actions/workflows/ci.yml)
+
 # rash — Rust Auto SSH
 
 Start an `ssh` session or tunnel, watch it, and restart it when it dies or stops passing
