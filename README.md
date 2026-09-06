@@ -98,7 +98,10 @@ failing later with an opaque error from inside the socket layer.
 
 ### Named sessions
 
-`~/.config/rash/config.toml`, optional and absent by default:
+Optional and absent by default. Two locations are searched, first that exists
+wins: **`~/.rash.toml`**, then **`~/.config/rash/config.toml`** (honouring
+`XDG_CONFIG_HOME`). `--config PATH` overrides both, and naming a file that
+isn't there is an error rather than an empty config.
 
 ```toml
 [defaults]

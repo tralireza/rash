@@ -344,6 +344,14 @@ can see the supervisor is alive.
 .Sh CONFIGURATION FILE
 Optional, and absent by default.
 Sessions let a tunnel you run often be named once.
+.Pp
+Two locations are searched, and the first that exists is used:
+.Pa ~/.rash.toml ,
+then
+.Pa ~/.config/rash/config.toml .
+.Fl -config
+overrides both, and naming a file that does not exist is an error rather than
+an empty configuration.
 .Bd -literal -offset indent
 [defaults]
 poll = 300
@@ -376,8 +384,10 @@ as overriding
 .Fl M .
 .Sh FILES
 .Bl -tag -width Ds
+.It Pa ~/.rash.toml
+Configuration file, tried first.
 .It Pa ~/.config/rash/config.toml
-Default configuration file.
+Configuration file, tried second.
 .Ev XDG_CONFIG_HOME
 is honoured if set.
 .It Pa /tmp/rash-<uid>/

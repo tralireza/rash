@@ -389,6 +389,28 @@ fn an_unknown_session_names_the_ones_that_exist() {
 }
 
 #[test]
+fn the_config_file_is_searched_in_order() {
+    let env: &[(&str, &str)] = &[("HOME", "/home/me")];
+    assert_eq!(
+        config::config_file_candidates(env),
+        [
+            PathBuf::from("/home/me/.rash.toml"),
+            PathBuf::from("/home/me/.config/rash/config.toml"),
+        ]
+    );
+
+    // XDG_CONFIG_HOME moves only the second candidate.
+    let env: &[(&str, &str)] = &[("HOME", "/home/me"), ("XDG_CONFIG_HOME", "/xdg")];
+    assert_eq!(
+        config::config_file_candidates(env),
+        [
+            PathBuf::from("/home/me/.rash.toml"),
+            PathBuf::from("/xdg/rash/config.toml"),
+        ]
+    );
+}
+
+#[test]
 fn an_unknown_log_format_is_rejected() {
     let inv = cli::parse(["-M", "0", "host"].iter().map(OsString::from)).expect("parse");
     let env: &[(&str, &str)] = &[("RASH_LOG_FORMAT", "yaml")];

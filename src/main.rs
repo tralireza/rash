@@ -10,7 +10,7 @@ use rash::pidfile::PidFile;
 use rash::supervise::{self, Verdict};
 use rash::{cli, daemon, log, log_info, settings};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
@@ -61,10 +61,10 @@ rash-only variables:
     RASH_SSH_PATH          path to ssh, as AUTOSSH_PATH
     RASH_TOUCH_PIDFILE     touch the pid file on every poll
 
-The config file is $XDG_CONFIG_HOME/rash/config.toml, or
-~/.config/rash/config.toml. It is optional, and is the lowest layer of the
-precedence stack: flag, then RASH_*, then AUTOSSH_*, then [session.NAME], then
-[defaults], then the built-in default.
+The config file is optional. rash reads ~/.rash.toml if it exists, and
+otherwise $XDG_CONFIG_HOME/rash/config.toml (or ~/.config/rash/config.toml).
+It is the lowest layer of the precedence stack: flag, then RASH_*, then
+AUTOSSH_*, then [session.NAME], then [defaults], then the built-in default.
 ";
 
 fn main() -> ExitCode {
@@ -96,7 +96,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             return Err(format!("no such config file: {}", p.display()).into());
         }
         Some(p) => p.clone(),
-        None => config::config_file_path(&ProcessEnv),
+        None => default_config_path(),
     };
     let file = settings::load(&config_path)?;
 
@@ -180,6 +180,21 @@ fn absolutize(cfg: &mut Config) {
 fn usage() -> ExitCode {
     let _ = write!(io::stderr(), "{USAGE}");
     ExitCode::FAILURE
+}
+
+/// The first candidate that exists.
+///
+/// When none does — the usual case — the last one is returned, so anything
+/// reported to the user names the conventional location rather than whichever
+/// happens to be searched first.
+fn default_config_path() -> PathBuf {
+    let candidates = config::config_file_candidates(&ProcessEnv);
+    candidates
+        .iter()
+        .find(|p| p.exists())
+        .or_else(|| candidates.last())
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn list_sessions(path: &Path, file: &settings::File) {

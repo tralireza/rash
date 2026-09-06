@@ -294,19 +294,26 @@ pub fn remote_sock_example(unix: &UnixPaths) -> PathBuf {
 /// room rather than sitting on the limit.
 const SUN_PATH_MAX: usize = 96;
 
-/// Where the config file lives: `$XDG_CONFIG_HOME/rash/config.toml`, else
-/// `~/.config/rash/config.toml`. The XDG path on macOS too, which is where this
-/// machine keeps its other tool configuration.
-pub fn config_file_path<E: EnvSource + ?Sized>(env: &E) -> PathBuf {
-    if let Some(d) = env.var("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
-        return PathBuf::from(d).join("rash").join("config.toml");
-    }
-    env.var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default()
-        .join(".config")
-        .join("rash")
-        .join("config.toml")
+/// Where to look for a config file, in order of preference:
+///
+/// 1. `~/.rash.toml`, for a single file you can keep next to your dotfiles
+/// 2. `$XDG_CONFIG_HOME/rash/config.toml`, or `~/.config/rash/config.toml`
+///
+/// The caller takes the first that exists. Returning the candidates rather than
+/// resolving them here keeps this module free of filesystem access, so
+/// [`resolve_with`] stays testable without one.
+pub fn config_file_candidates<E: EnvSource + ?Sized>(env: &E) -> Vec<PathBuf> {
+    let home = env.var("HOME").map(PathBuf::from).unwrap_or_default();
+
+    let xdg = match env.var("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
+        Some(d) => PathBuf::from(d),
+        None => home.join(".config"),
+    };
+
+    vec![
+        home.join(".rash.toml"),
+        xdg.join("rash").join("config.toml"),
+    ]
 }
 
 /// Where the UNIX monitor's local sockets live.
