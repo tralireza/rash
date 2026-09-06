@@ -116,8 +116,15 @@ fn start_tunnel() {
 
 fn spawn_server(port: u16, handle: impl Fn(TcpStream) + Send + Copy + 'static) {
     thread::spawn(move || {
-        let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) else {
-            return;
+        let listener = match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(l) => l,
+            Err(e) => {
+                // Returning quietly here would surface as an unexplained probe
+                // timeout twenty seconds later in whichever test is running.
+                // Exiting makes the supervisor log it immediately instead.
+                eprintln!("fake-ssh: cannot bind 127.0.0.1:{port}: {e}");
+                std::process::exit(70);
+            }
         };
         for conn in listener.incoming().flatten() {
             thread::spawn(move || handle(conn));

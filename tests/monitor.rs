@@ -6,6 +6,7 @@ use rash::monitor::{Monitor, probe};
 use std::ffi::OsString;
 use std::net::TcpListener as StdTcpListener;
 use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -21,21 +22,27 @@ fn config_for(spec: &str, poll: &str) -> Config {
 }
 
 /// Bind a stand-in server and return it along with its port, which is always
-/// even and whose successor is free.
+/// even and whose successor is free for the monitor to take.
 ///
-/// The listener is held rather than probed and released, so a parallel test
-/// cannot take the port from under us. Handing out only even ports means no
-/// test's server can ever land on another test's monitor port, which is always
-/// odd (`port + 1`).
+/// The port comes from a fixed range below the ephemeral range rather than from
+/// `bind(0)`. With `bind(0)` the pair lands in 32768+ on Linux (49152+ on
+/// macOS), which is also where the kernel draws outbound source ports from — and
+/// these tests open plenty of local connections, so `port + 1` can be taken in
+/// the gap between checking it and `Monitor::bind` claiming it.
+///
+/// Even-only, and a range disjoint from the one `e2e.rs` uses, so no two
+/// stand-ins can ever collide.
 async fn stand_in() -> (TcpListener, u16) {
-    for _ in 0..500 {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
-        let p = listener.local_addr().expect("local_addr").port();
-        if p % 2 == 0 && p < u16::MAX && StdTcpListener::bind(("127.0.0.1", p + 1)).is_ok() {
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    for _ in 0..2000 {
+        let p = 25000 + (NEXT.fetch_add(2, Ordering::Relaxed) % 4000);
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", p)).await
+            && StdTcpListener::bind(("127.0.0.1", p + 1)).is_ok()
+        {
             return (listener, p);
         }
     }
-    panic!("could not find a usable even port");
+    panic!("could not find a free port pair below the ephemeral range");
 }
 
 /// Stand in for the ssh forward loop: accept on the write port and hand the

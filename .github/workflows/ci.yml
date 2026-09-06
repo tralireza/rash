@@ -7,7 +7,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  # So a panicking test says where, rather than just exiting 101.
+  RUST_BACKTRACE: 1
 
 jobs:
   fmt:
@@ -34,5 +35,9 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets --all-features
+      # -D warnings belongs here, after the --, so it applies to this crate
+      # only. As a global RUSTFLAGS it would also deny warnings in every
+      # dependency, and a new lint in a newer compiler would then fail the
+      # build for code that is not ours.
+      - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-targets

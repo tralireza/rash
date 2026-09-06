@@ -7,7 +7,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 const RASH: &str = env!("CARGO_BIN_EXE_rash");
@@ -171,22 +171,31 @@ fn alive(pid: i32) -> bool {
 }
 
 /// An even port whose successor is also free: the fake ssh takes `p` and rash's
-/// monitor takes `p + 1`. Even-only, so two tests running in parallel cannot
-/// have one's forward land on the other's monitor port.
+/// monitor takes `p + 1`.
+///
+/// These deliberately come from a fixed range *below* the ephemeral range rather
+/// than from `bind(0)`. Two reasons, both of which bite on Linux and not on a
+/// quiet macOS box:
+///
+/// * Linux allocates outbound source ports from 32768-60999, so a port obtained
+///   by binding 0 and releasing it can be taken by an unrelated connection in
+///   the gap before the child process binds it — and these tests open a lot of
+///   local connections.
+/// * Two of the fourteen tests here run in parallel and can be handed the same
+///   port by successive `bind(0)` calls. The counter makes each caller distinct.
+///
+/// Even-only, so one test's forward can never land on another's monitor port.
 fn free_even_port() -> u16 {
-    for _ in 0..500 {
-        let Ok(a) = std::net::TcpListener::bind(("127.0.0.1", 0)) else {
-            continue;
-        };
-        let p = a.local_addr().expect("local_addr").port();
-        if p % 2 != 0 {
-            continue;
-        }
-        if std::net::TcpListener::bind(("127.0.0.1", p + 1)).is_ok() {
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    for _ in 0..2000 {
+        let p = 21000 + (NEXT.fetch_add(2, Ordering::Relaxed) % 4000);
+        if std::net::TcpListener::bind(("127.0.0.1", p)).is_ok()
+            && std::net::TcpListener::bind(("127.0.0.1", p + 1)).is_ok()
+        {
             return p;
         }
     }
-    panic!("could not find a free even port");
+    panic!("could not find a free port pair below the ephemeral range");
 }
 
 #[test]
