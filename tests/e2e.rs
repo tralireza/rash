@@ -174,6 +174,18 @@ impl Running {
         }
     }
 
+    /// The ssh pid rash logged, once rash has got round to logging it.
+    ///
+    /// Seeing `starts()` rise is not enough to call `ssh_pid()`. That file is
+    /// written by the fake ssh; the pid line is written by rash, after `spawn()`
+    /// has already returned. Two processes, two files, and nothing ordering the
+    /// one against the other — so on a loaded box the child can record its start
+    /// before the parent has logged the pid, and the bare `expect` fails.
+    fn wait_for_ssh_pid(&self) -> i32 {
+        self.wait_until("rash to log the ssh pid", |r| r.ssh_pid().is_some());
+        self.ssh_pid().expect("just waited for it")
+    }
+
     /// The ssh pid rash logged, so a test can check it really was cleaned up.
     fn ssh_pid(&self) -> Option<i32> {
         self.log()
@@ -471,7 +483,7 @@ fn sigterm_stops_rash_and_reaps_ssh() {
     let mut r = Rash::new(&s).args(&["-M", "0", "-N", "host"]).spawn();
 
     r.wait_until("ssh to start", |r| r.starts() == 1);
-    let ssh = r.ssh_pid().expect("rash should log the ssh pid");
+    let ssh = r.wait_for_ssh_pid();
 
     r.signal(libc::SIGTERM);
     assert_eq!(r.wait_for_exit().code(), Some(1));
@@ -516,7 +528,7 @@ fn a_child_that_ignores_sigterm_is_killed() {
         .spawn();
 
     r.wait_until("ssh to start", |r| r.starts() == 1);
-    let ssh = r.ssh_pid().expect("rash should log the ssh pid");
+    let ssh = r.wait_for_ssh_pid();
 
     r.signal(libc::SIGTERM);
     assert_eq!(r.wait_for_exit().code(), Some(1));
