@@ -1,0 +1,47 @@
+[package]
+name = "rash"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"   # let-chains
+description = "Rust Auto SSH — start an ssh session or tunnel, monitor it, and restart it when it dies or stops passing traffic"
+repository = "https://github.com/tralireza/rash"
+license = "MIT"
+keywords = ["ssh", "tunnel", "autossh", "supervisor"]
+categories = ["command-line-utilities", "network-programming"]
+# GitHub-only for now; see the plan's "Open items".
+publish = false
+
+[features]
+default = ["test-harness"]
+# The fake-ssh stand-in used by the end-to-end tests. On by default so
+# `cargo test` works unconfigured; turn it off to install just `rash`.
+test-harness = []
+
+[[bin]]
+name = "rash"
+path = "src/main.rs"
+
+[[bin]]
+name = "fake-ssh"
+path = "tests/bin/fake_ssh.rs"
+required-features = ["test-harness"]
+
+[dependencies]
+libc = "0.2"
+# serde / serde_json / toml arrive with the config file and JSON log sink (M4).
+tokio = { version = "1", features = [
+  "rt",
+  "macros",
+  "process",
+  "net",
+  "signal",
+  "time",
+  "io-util",
+] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+# The libc call sites are few and each is justified in a `SAFETY:` comment.
+undocumented_unsafe_blocks = "warn"
