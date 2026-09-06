@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # A manual run builds and packages everything but publishes nothing, so the
+  # whole pipeline can be rehearsed without spending a tag on finding out it
+  # was wrong.
+  workflow_dispatch:
+
+# Only `publish` writes anything; everything above it is read-only.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Nothing else stops `git tag v0.2.0` on a tree whose manifest still says
+      # 0.1.0, and the mistake is only visible once the release is published.
+      - name: Tag must match the version in Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          manifest=$(cargo metadata --no-deps --format-version 1 \
+                       | jq -r '.packages[0].version')
+          tag=${GITHUB_REF_NAME#v}
+          if [ "$manifest" != "$tag" ]; then
+            echo "::error::tag $GITHUB_REF_NAME means version $tag, but Cargo.toml says $manifest"
+            exit 1
+          fi
+          echo "releasing rash $manifest"
+
+  # The full CI matrix — fmt, clippy and tests on stable, nightly and the MSRV,
+  # across Linux and macOS. Reused rather than restated so the two cannot drift.
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: [verify, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          # Free on public repositories. On a private one this row needs a paid
+          # larger-runner plan, or cross-compilation in place of a native build.
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          # macos-13 is the last x86_64 image and is on a deprecation path. When
+          # it goes, drop this row and build a universal binary on macos-latest
+          # instead: build both Apple targets, then join them with
+          # `lipo -create -output rash <arm64> <x86_64>`.
+          - { os: macos-13, target: x86_64-apple-darwin }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Deliberately uncached, unlike ci.yml: a published binary is worth the
+      # few extra minutes of building from scratch.
+      #
+      # --no-default-features is the load-bearing flag here. The default feature
+      # set includes `test-harness`, which builds fake-ssh — the ssh stand-in
+      # the tests drive. It is on by default so `cargo test` works unconfigured,
+      # and it has no business in a release tarball.
+      - name: Build
+        run: >
+          cargo build --release --locked --no-default-features
+          --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          name="rash-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/rash" "$name/"
+          # The manual matters: the README's install instructions place it, and
+          # `man ./rash.1` works straight out of the unpacked directory.
+          cp rash.1 LICENSE README.md "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          ls -l "$name.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rash-${{ matrix.target }}
+          path: rash-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    # Skipped on a manual run: that is the rehearsal, and it stops here.
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum *.tar.gz | tee SHA256SUMS
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A tag with a hyphen in it — v0.2.0-rc1 — is a pre-release.
+          case "$GITHUB_REF_NAME" in
+            *-*) pre=--prerelease ;;
+            *)   pre= ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" \
+            dist/*.tar.gz dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "rash $GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag \
+            $pre

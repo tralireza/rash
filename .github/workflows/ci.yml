@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # So release.yml can gate a release on this exact matrix rather than
+  # restating a copy of it that would drift.
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always

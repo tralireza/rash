@@ -26,6 +26,12 @@ name = "fake-ssh"
 path = "tests/bin/fake_ssh.rs"
 required-features = ["test-harness"]
 
+[profile.release]
+# Drop debug info but keep the symbol table: a released binary has no use for
+# the former, and a backtrace out of a wedged supervisor is worth much more
+# with function names than without. `strip = true` would take both.
+strip = "debuginfo"
+
 [dependencies]
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
