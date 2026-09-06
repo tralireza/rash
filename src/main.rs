@@ -88,11 +88,16 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         print!("{USAGE}");
         return Ok(ExitCode::SUCCESS);
     }
-    let config_path = inv
-        .config
-        .clone()
-        .unwrap_or_else(|| config::config_file_path(&ProcessEnv));
-    // A missing config file is normal: most runs are entirely command line.
+    // A missing default config file is normal — most runs are entirely command
+    // line — but one named with --config was asked for by name, so its absence
+    // is a mistake worth reporting rather than silently treating as empty.
+    let config_path = match &inv.config {
+        Some(p) if !p.exists() => {
+            return Err(format!("no such config file: {}", p.display()).into());
+        }
+        Some(p) => p.clone(),
+        None => config::config_file_path(&ProcessEnv),
+    };
     let file = settings::load(&config_path)?;
 
     if inv.list {

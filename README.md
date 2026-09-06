@@ -3,7 +3,8 @@
 Start an `ssh` session or tunnel, watch it, and restart it when it dies or stops passing
 traffic. `rash` is a behaviour-compatible reimplementation of [autossh(1)][autossh] in Rust.
 
-**Status: work in progress.** See [Milestones](#milestones) for what works today.
+**Status: feature-complete.** Everything autossh does, plus the additions under
+[Beyond autossh](#beyond-autossh). See `man ./rash.1` for the full manual.
 
 ## Why
 
@@ -49,6 +50,25 @@ default. ssh has no long options at all, which is what makes `--xxx` a safe exte
 Both are strictly more robust. Everything else that differs is a bug fix — notably, autossh
 strips `f` from arguments that appear *after* `--`, so `autossh -M 0 host -- cmd -flag`
 hands ssh `-lag`; rash stops rewriting at the first `--`.
+
+## Migrating from autossh
+
+Replace `autossh` with `rash`. That is the whole procedure — the flags, the
+environment variables, the exit codes and the log lines are all the same, so
+wrapper scripts, systemd units and launchd plists need no changes.
+
+Only `AUTOSSH_NTSERVICE` is gone, along with Cygwin support. The three
+behaviours that differ on purpose are listed above; everything else that
+differs is a bug fix.
+
+Once you have switched, these are worth knowing about:
+
+| Instead of | Consider |
+|---|---|
+| `-M 20000`, and finding two free ports on each machine | `--monitor unix` — no ports at either end |
+| A wrapper script per tunnel | a `[session.<name>]` block, then `rash --session <name>` |
+| Guessing what ssh will actually receive | `rash --dry-run` |
+| `AUTOSSH_LOGFILE` and parsing text | `RASH_LOG` and `RASH_LOG_FORMAT=json` |
 
 ## Beyond autossh
 
@@ -114,20 +134,36 @@ parsing is unaffected.
 - [x] **M2** — supervisor: spawn, exit policy, backoff, signals, daemonise, pidfile
 - [x] **M3** — TCP monitor, loop and echo modes
 - [x] **M4** — UNIX-socket monitor, TOML sessions, JSON logging
-- [ ] **M5** — `rash.1`, migration guide
+- [x] **M5** — `rash.1`, migration guide
 
 Everything autossh does is working: `rash -M port`, `rash -M port:echo_port` and
 `rash -M 0`, the exit-status policy and backoff, `SIGTERM`/`SIGINT`/`SIGQUIT`/
 `SIGUSR1`/`SIGHUP`, `-f`, and the pid file. What remains is new surface rather
 than parity.
 
-## Building
+## Building and installing
 
 ```sh
 cargo build --release
+
+install -d  ~/.local/share/man/man1
+install -m 755 target/release/rash  ~/.local/bin/
+install -m 644 rash.1               ~/.local/share/man/man1/
 ```
 
-No nightly features are used; stable and nightly are both tested in CI.
+`~/.local/share/man` is on the default manpath on both macOS and Linux, so
+`man rash` works from there with no further setup.
+
+To read the manual without installing it — note the leading `./`, which is what
+makes both BSD and GNU `man` treat the argument as a file rather than a name:
+
+```sh
+man ./rash.1
+```
+
+No nightly features are used; stable and nightly are both tested in CI, on Linux
+and macOS. `cargo install --path . --no-default-features` skips the fake-ssh
+test harness and builds only `rash`.
 
 ## Credits
 

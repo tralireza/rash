@@ -1,0 +1,473 @@
+.\" rash — Rust Auto SSH
+.\"
+.\" Copyright (c) 2026 Alireza Torabi
+.\" Distributed under the MIT licence; see the LICENSE file.
+.\"
+.Dd September 6, 2026
+.Dt RASH 1
+.Os
+.Sh NAME
+.Nm rash
+.Nd monitor and restart ssh sessions
+.Sh SYNOPSIS
+.Nm
+.Op Fl V
+.Op Fl M Ar port Ns Op : Ns Ar echo_port
+.Op Fl f
+.Op Fl -dry-run
+.Op Fl -monitor Ar spec
+.Op Ar SSH_OPTIONS
+.Nm
+.Fl -session Ar name
+.Op Fl -config Ar path
+.Nm
+.Fl -list
+.Op Fl -config Ar path
+.Sh DESCRIPTION
+.Nm
+starts a copy of
+.Xr ssh 1
+and watches it, restarting it if it dies or stops passing traffic.
+It is a behaviour-compatible reimplementation of
+.Xr autossh 1
+by Carson Harding: the same flags, the same environment variables, the same
+exit-status policy, the same restart backoff, and the same log format.
+Wrapper scripts written for autossh work unchanged.
+.Pp
+Traffic is tested by sending a message through the tunnel and requiring the
+same bytes back.
+There are three arrangements, described under
+.Sx MONITORING .
+.Pp
+Because connections must be established unattended,
+.Nm
+requires some form of automatic authentication, normally public-key
+authentication with
+.Xr ssh-agent 1 .
+Make sure the ssh command works on its own before putting
+.Nm
+in front of it.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl M Ar port Ns Op : Ns Ar echo_port
+Set the monitor port.
+Without an echo port this port and the one above it
+.Pq Ar port + 1
+must both be free; see
+.Sx MONITORING .
+A value of
+.Cm 0
+turns monitoring off, leaving
+.Nm
+to react only to ssh exiting and to signals.
+.Pp
+.Nm
+also accepts
+.Cm unix
+here, though
+.Fl -monitor
+reads better for it.
+.Pp
+This flag is overridden by
+.Ev AUTOSSH_PORT ,
+which autossh documents as deliberate, in case ssh should ever want
+.Fl M
+back.
+Note that ssh already uses
+.Fl M
+for
+.Cm ControlMaster ;
+if you want that meaning, write
+.Fl o Cm ControlMaster=yes .
+.It Fl f
+Run in the background.
+.Nm
+handles this itself and does not pass it to ssh, so ssh cannot prompt for a
+password or passphrase.
+Implies a gate time of 0; see
+.Ev AUTOSSH_GATETIME .
+.It Fl V
+Print the version and exit.
+.It Fl -dry-run
+Print the exact ssh command that would be executed, together with every
+resolved setting, and exit.
+The best way to check argument rewriting, forward injection and
+configuration precedence without connecting to anything.
+.It Fl -monitor Ar spec
+As
+.Fl M ,
+but takes precedence over it and over the environment.
+.Ar spec
+is a port, a
+.Ar port:echo_port
+pair,
+.Cm 0 ,
+or
+.Cm unix .
+.It Fl -session Ar name
+Take settings from
+.Bq session . Ns Ar name
+in the configuration file; see
+.Sx CONFIGURATION FILE .
+The session may supply the ssh arguments too, in which case nothing else is
+needed on the command line.
+.It Fl -config Ar path
+Read this configuration file rather than the default.
+.It Fl -list
+List the sessions the configuration file defines, and exit.
+.El
+.Pp
+Every other option is passed to ssh untouched, including options
+.Nm
+has never heard of.
+Long options always belong to
+.Nm ,
+since ssh has none, and everything after a
+.Cm \-\-
+belongs to ssh.
+.Sh MONITORING
+.Ss Loop
+.Pq Fl M Ar port
+The default.
+.Nm
+adds
+.Fl L Ar port : Ns Cm 127.0.0.1 : Ns Ar port
+and
+.Fl R Ar port : Ns Cm 127.0.0.1 : Ns Ar port+1 ,
+which together form a circuit: a probe written to the local monitor port
+travels to the remote, where the matching remote forward sends it straight
+back to a second local port that
+.Nm
+is listening on.
+Both ports must be free locally, and
+.Ar port
+must be free on the remote.
+.Ss Echo
+.Pq Fl M Ar port : Ns Ar echo_port
+Only
+.Fl L Ar port : Ns Cm 127.0.0.1 : Ns Ar echo_port
+is added, and the probe is returned by an echo service on the remote.
+Use port 7 for the standard inetd echo service, which many hosts disable.
+Only one port is used, and it carries traffic in both directions.
+.Ss Unix
+.Pq Fl -monitor Cm unix
+The loop again, but over UNIX-domain sockets, so there are no ports to
+choose and none to collide at either end.
+.Pp
+The remote socket path is regenerated on every ssh start.
+This matters:
+.Cm StreamLocalBindUnlink
+defaults to
+.Cm no
+in
+.Xr sshd_config 5
+and a client cannot override it, so a socket left behind by an unclean
+disconnect would stop sshd binding it again, and
+.Nm
+would reconnect for ever against a forward that could never come up.
+A fresh path each time avoids depending on the server's configuration.
+.Pp
+The remote needs
+.Cm AllowStreamLocalForwarding ,
+which is the default, and a writable
+.Pa /tmp ;
+see
+.Ev RASH_REMOTE_SOCKET_DIR
+if not.
+.Ss Off
+.Pq Fl M Cm 0
+No forwards are added and nothing is monitored.
+.Nm
+restarts ssh only when it exits, and reacts to signals.
+With a recent OpenSSH,
+.Cm ServerAliveInterval
+and
+.Cm ServerAliveCountMax
+are often a better answer than a monitor port.
+.Sh CONTROLLING SSH
+.Ss When ssh exits
+.Bl -enum -width Ds
+.It
+Exited cleanly, status 0: someone ended the session deliberately, so
+.Nm
+exits too.
+.It
+Exited with status 255:
+.Nm
+restarts it.
+ssh reports both a dropped connection and a failed authentication this way
+and offers no means of telling them apart, which is what the starting gate
+below is for.
+.It
+Exited with status 1 or 2 on a run after the first: taken as the network
+having gone away, so
+.Nm
+restarts it.
+Status 2 also arises when a tunnel loses a race with the remote end tearing
+one down.
+.It
+Killed by a signal:
+.Nm
+restarts it, on the grounds that something killed a hung session rather than
+meaning to stop the supervisor as well.
+.It
+Any other status: reported and
+.Nm
+exits.
+.El
+.Ss Startup
+There is a starting gate.
+If the very first ssh exits within
+.Ev AUTOSSH_GATETIME
+seconds,
+.Nm
+concludes it never got out of the gate — bad credentials, an unreachable
+host, a mistake on the command line — and exits rather than looping.
+Setting the gate time to 0 disables this, and also makes a first-run exit
+with status 1 a restart rather than a failure.
+The
+.Fl f
+flag sets it to 0.
+.Ss Continued failures
+Restarts that keep failing quickly are spaced further and further apart, up
+to the poll interval.
+A session that stays up for a tenth of the poll interval — at least ten
+seconds — clears the count.
+.Ss Signals
+.Bl -tag -width "SIGTERM, SIGINT, SIGQUIT"
+.It Dv SIGTERM , SIGINT , SIGQUIT
+Kill the ssh child and exit with status 1.
+.It Dv SIGUSR1
+Kill the ssh child and start a new one.
+.It Dv SIGHUP , SIGUSR2
+Wake the loop, which prods
+.Nm
+out of a backoff sleep.
+.It Dv SIGPIPE
+Ignored.
+.El
+.Pp
+A child that does not honour
+.Dv SIGTERM
+within
+.Ev RASH_KILL_TIMEOUT
+seconds is sent
+.Dv SIGKILL .
+.Sh ENVIRONMENT
+Every variable below is also read as
+.Ev RASH_ Ns Ar NAME ,
+which takes precedence over the
+.Ev AUTOSSH_
+spelling.
+.Bl -tag -width Ds
+.It Ev AUTOSSH_DEBUG
+If set, log at maximum verbosity and mirror everything to standard error.
+.It Ev AUTOSSH_FIRST_POLL
+Seconds before the first connection test.
+Defaults to the poll time.
+.It Ev AUTOSSH_GATETIME
+Seconds ssh must stay up before the connection counts as established.
+Default 30.
+Setting it to 0 disables the starting gate entirely.
+.It Ev AUTOSSH_LOGFILE
+Log to this file rather than to syslog.
+.It Ev AUTOSSH_LOGLEVEL
+Verbosity, as a syslog number from 0 to 7, or as a level name.
+.It Ev AUTOSSH_MAXLIFETIME
+Seconds to run before killing the ssh child and exiting.
+0 means no limit.
+.It Ev AUTOSSH_MAXSTART
+How many times to start ssh.
+Negative means no limit, which is the default.
+.It Ev AUTOSSH_MESSAGE
+Text appended to the probe message, at most 64 bytes.
+.It Ev AUTOSSH_PATH
+Path to the ssh executable.
+Also
+.Ev RASH_SSH_PATH ,
+which reads less like an override of
+.Ev PATH .
+.It Ev AUTOSSH_PIDFILE
+Write the process id here.
+The file is removed on exit.
+.It Ev AUTOSSH_POLL
+Seconds between connection tests.
+Default 600.
+If the poll time is less than twice the network timeout, the timeout is
+reduced to half the poll time.
+.It Ev AUTOSSH_PORT
+Monitor port.
+Overrides
+.Fl M .
+.El
+.Pp
+The following have no autossh counterpart.
+.Bl -tag -width Ds
+.It Ev RASH_KILL_TIMEOUT
+Seconds a child gets to honour
+.Dv SIGTERM
+before it is killed outright.
+Default 5.
+.It Ev RASH_LOG
+Where log lines go:
+.Cm syslog ,
+.Cm stderr ,
+or a path.
+.It Ev RASH_LOG_FORMAT
+.Cm text ,
+the default, or
+.Cm json ,
+which emits one object per line with
+.Va ts , level , pid
+and
+.Va msg .
+Syslog always receives plain text.
+.It Ev RASH_MONITOR_HOST
+Address the monitor forwards use.
+Default
+.Cm 127.0.0.1 .
+IPv6 literals are accepted and bracketed correctly.
+.It Ev RASH_REMOTE_SOCKET_DIR
+Directory on the remote for the UNIX monitor socket.
+Default
+.Pa /tmp .
+.It Ev RASH_SOCKET_DIR
+Directory for the local UNIX monitor sockets.
+Defaults to
+.Ev XDG_RUNTIME_DIR ,
+or
+.Pa /tmp/rash-<uid> .
+.It Ev RASH_TOUCH_PIDFILE
+If set, update the pid file's modification time at every poll, so a watchdog
+can see the supervisor is alive.
+.El
+.Sh CONFIGURATION FILE
+Optional, and absent by default.
+Sessions let a tunnel you run often be named once.
+.Bd -literal -offset indent
+[defaults]
+poll = 300
+gatetime = 15
+
+[session.homelab]
+monitor  = 20000        # or "20000:7", or "unix", or 0
+ssh_args = ["-N", "-R", "2200:localhost:22", "me@host"]
+poll     = 60
+message  = "homelab"
+.Ed
+.Pp
+Run it with
+.Nm
+.Fl -session Cm homelab .
+.Pp
+The file is the lowest layer of the precedence stack, above only the
+built-in defaults.
+Highest first: a command-line flag, then
+.Ev RASH_ Ns Ar NAME ,
+then
+.Ev AUTOSSH_ Ns Ar NAME ,
+then
+.Bq session . Ns Ar name ,
+then
+.Bq defaults .
+The monitor port inverts the top two rungs, because autossh documents
+.Ev AUTOSSH_PORT
+as overriding
+.Fl M .
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa ~/.config/rash/config.toml
+Default configuration file.
+.Ev XDG_CONFIG_HOME
+is honoured if set.
+.It Pa /tmp/rash-<uid>/
+Local UNIX monitor sockets, when
+.Ev XDG_RUNTIME_DIR
+is unset.
+Created mode 0700.
+.El
+.Sh EXIT STATUS
+.Nm
+exits 0 when ssh exited cleanly, when the maximum start count was reached,
+or when the maximum lifetime elapsed.
+It exits 1 on a signal, on a failure it cannot recover from, and when the
+first ssh session fails inside the starting gate.
+.Sh EXAMPLES
+Forward a local port, restarting whenever the tunnel stops carrying traffic:
+.Pp
+.Dl $ rash -M 20000 -N -L 8080:localhost:80 me@host
+.Pp
+The same, without choosing any port numbers:
+.Pp
+.Dl $ rash --monitor unix -N -L 8080:localhost:80 me@host
+.Pp
+Check what would run, and with what settings, without connecting:
+.Pp
+.Dl $ rash --dry-run -M 20000 -N me@host
+.Pp
+No monitoring, leaving ssh to notice a dead link itself:
+.Pp
+.Dl $ rash -M 0 -N -o ServerAliveInterval=15 me@host
+.Pp
+In the background, logging JSON to a file:
+.Bd -literal -offset indent
+$ RASH_LOG=/var/log/rash.log RASH_LOG_FORMAT=json \e
+      rash -f -M 20000 -N me@host
+.Ed
+.Sh COMPATIBILITY
+Defaults match autossh, so existing scripts, units and
+.Ev AUTOSSH_
+variables need no changes.
+.Ev AUTOSSH_NTSERVICE
+is the only one dropped, along with Cygwin support.
+.Pp
+Three behaviours differ deliberately.
+.Bl -bullet -width Ds
+.It
+A child that ignores
+.Dv SIGTERM
+is escalated to
+.Dv SIGKILL .
+autossh waits for it indefinitely.
+.It
+The monitor makes three probe attempts.
+autossh configures three but performs two.
+.It
+Numbers are read in base 10.
+autossh passes base 0 to
+.Xr strtoul 3 ,
+so it reads
+.Fl M Cm 020000
+as octal.
+.El
+.Pp
+Everything else that differs is a bug fix.
+Notably, autossh strips
+.Cm f
+from arguments appearing after
+.Cm -- ,
+turning
+.Cm "\-\- cmd \-flag"
+into
+.Cm "cmd \-lag" ,
+and it rejects ssh options missing from its own hardcoded table, which on
+OpenSSH 10 includes
+.Fl B
+and mis-parses
+.Fl P .
+.Sh SEE ALSO
+.Xr ssh 1 ,
+.Xr ssh-add 1 ,
+.Xr ssh-agent 1 ,
+.Xr ssh_config 5 ,
+.Xr sshd_config 5
+.Sh HISTORY
+autossh was written by Carson Harding and is the origin of every behaviour
+.Nm
+reproduces.
+.Nm
+is an independent implementation, written from autossh's observable
+behaviour, its manual page and its source; it is not a line-by-line
+translation.
+.Sh AUTHORS
+.An Alireza Torabi
