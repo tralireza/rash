@@ -50,13 +50,70 @@ Both are strictly more robust. Everything else that differs is a bug fix — not
 strips `f` from arguments that appear *after* `--`, so `autossh -M 0 host -- cmd -flag`
 hands ssh `-lag`; rash stops rewriting at the first `--`.
 
+## Beyond autossh
+
+All opt-in. Defaults are unchanged, so none of this affects a plain `rash -M
+20000 …`.
+
+### A monitor with no ports
+
+```sh
+rash --monitor unix -N me@host
+```
+
+Runs the monitor loop over UNIX-domain sockets rather than TCP, so there are no
+ports to choose and none to collide — at either end.
+
+The remote socket path is regenerated on **every ssh start**, and that detail is
+load-bearing. `StreamLocalBindUnlink` defaults to `no` in `sshd_config` and a
+client cannot override it, so a socket left behind by an unclean disconnect
+would block sshd from binding it again and rash would reconnect forever against
+a forward that could never come up. A fresh path sidesteps the server's
+configuration entirely.
+
+The remote needs `AllowStreamLocalForwarding` (already the default) and a
+writable `/tmp`; point `RASH_REMOTE_SOCKET_DIR` elsewhere if not. Socket paths
+are checked against the ~104-byte `sun_path` limit while resolving, rather than
+failing later with an opaque error from inside the socket layer.
+
+### Named sessions
+
+`~/.config/rash/config.toml`, optional and absent by default:
+
+```toml
+[defaults]
+poll = 300
+gatetime = 15
+
+[session.homelab]
+monitor  = 20000                                       # or "20000:7", "unix", 0
+ssh_args = ["-N", "-R", "2200:localhost:22", "me@host"]
+poll     = 60
+```
+
+```sh
+rash --session homelab      # rash --list shows what is defined
+```
+
+The file is the **lowest** layer of the precedence stack, above only the
+built-in defaults: a flag beats `RASH_*`, which beats `AUTOSSH_*`, which beats
+`[session.<name>]`, which beats `[defaults]`. Anything the file can set is also
+settable the old way.
+
+### Structured logs
+
+`RASH_LOG_FORMAT=json` emits one object per line — `ts`, `level`, `pid`, `msg` —
+to whichever sink is in use. `RASH_LOG` picks that sink: `syslog`, `stderr`, or
+a path. The default text format is byte-identical to autossh's, so existing log
+parsing is unaffected.
+
 ## Milestones
 
 - [x] **M0** — scaffold
 - [x] **M1** — argument splitter, config resolution, `--dry-run`
 - [x] **M2** — supervisor: spawn, exit policy, backoff, signals, daemonise, pidfile
 - [x] **M3** — TCP monitor, loop and echo modes
-- [ ] **M4** — UNIX-socket monitor, TOML sessions, JSON logging
+- [x] **M4** — UNIX-socket monitor, TOML sessions, JSON logging
 - [ ] **M5** — `rash.1`, migration guide
 
 Everything autossh does is working: `rash -M port`, `rash -M port:echo_port` and

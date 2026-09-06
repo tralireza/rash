@@ -199,6 +199,32 @@ fn free_even_port() -> u16 {
 }
 
 #[test]
+fn the_json_log_sink_emits_one_object_per_line() {
+    let s = Scratch::new("json");
+    let mut r = Rash::new(&s)
+        .env("RASH_LOG_FORMAT", "json")
+        .env("FAKE_SSH_MODE", "exit")
+        .env("FAKE_SSH_EXIT_CODES", "0")
+        .env("AUTOSSH_GATETIME", "0")
+        .args(&["-M", "0", "-N", "host"])
+        .spawn();
+
+    assert_eq!(r.wait_for_exit().code(), Some(0));
+
+    let log = r.log();
+    assert!(!log.trim().is_empty(), "nothing was logged");
+    for l in log.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value =
+            serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON: {l}\n{e}"));
+        for key in ["ts", "level", "pid", "msg"] {
+            assert!(v.get(key).is_some(), "missing {key:?} in {l}");
+        }
+        assert_eq!(v["pid"], serde_json::json!(r.pid()));
+    }
+    assert!(log.contains("starting ssh"), "log:\n{log}");
+}
+
+#[test]
 fn a_healthy_tunnel_is_left_alone() {
     let port = free_even_port();
     let s = Scratch::new("healthy");

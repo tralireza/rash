@@ -15,4 +15,5 @@ pub mod daemon;
 pub mod log;
 pub mod monitor;
 pub mod pidfile;
+pub mod settings;
 pub mod supervise;

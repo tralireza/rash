@@ -5,11 +5,11 @@ use rash::config::{self, Config};
 use rash::monitor::{Monitor, probe};
 use std::ffi::OsString;
 use std::net::TcpListener as StdTcpListener;
-use std::os::fd::AsRawFd;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 
 fn config_with(spec: &str, env: &[(&str, &str)]) -> Config {
     let inv = cli::parse(["-M", spec, "-N", "host"].iter().map(OsString::from)).expect("parse");
@@ -143,12 +143,107 @@ async fn an_echo_probe_fails_when_the_reply_differs() {
     assert!(!monitor.probe(&cfg).await);
 }
 
+/// A scratch directory for UNIX sockets, under `/tmp` rather than `$TMPDIR`:
+/// on macOS the latter is a long `/var/folders/...` path that would not leave
+/// room inside `sun_path`.
+struct SockDir(PathBuf);
+
+impl SockDir {
+    fn new(tag: &str) -> Self {
+        let d = PathBuf::from(format!("/tmp/rash-t{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("scratch socket dir");
+        Self(d)
+    }
+
+    fn as_str(&self) -> &str {
+        self.0.to_str().expect("ascii path")
+    }
+}
+
+impl Drop for SockDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[tokio::test]
+async fn a_unix_probe_succeeds_when_the_data_comes_back() {
+    let dir = SockDir::new("ok");
+    let cfg = config_with(
+        "unix",
+        &[("RASH_SOCKET_DIR", dir.as_str()), ("AUTOSSH_POLL", "60")],
+    );
+    let monitor = Monitor::bind(&cfg).await.expect("bind the monitor");
+    let u = cfg.unix.clone().expect("unix paths");
+
+    // Stand in for ssh's -L: accept on the outbound socket and hand the bytes
+    // to the socket rash is listening on.
+    let tunnel = UnixListener::bind(&u.local_out).expect("bind the stand-in");
+    tokio::spawn(async move {
+        while let Ok((mut inbound, _)) = tunnel.accept().await {
+            let back = u.local_in.clone();
+            tokio::spawn(async move {
+                let Ok(mut outbound) = UnixStream::connect(&back).await else {
+                    return;
+                };
+                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+            });
+        }
+    });
+
+    assert!(monitor.probe(&cfg).await);
+    assert!(monitor.listener_fd().is_some());
+}
+
+#[tokio::test]
+async fn a_unix_probe_fails_when_nothing_answers() {
+    let dir = SockDir::new("dead");
+    let cfg = config_with(
+        "unix",
+        &[("RASH_SOCKET_DIR", dir.as_str()), ("AUTOSSH_POLL", "1")],
+    );
+    let monitor = Monitor::bind(&cfg).await.expect("bind the monitor");
+    // Nothing ever binds local_out, so there is no ssh to connect to.
+    assert!(!monitor.probe(&cfg).await);
+}
+
+#[tokio::test]
+async fn the_remote_socket_path_is_new_on_every_start() {
+    // The whole reason the UNIX arrangement is safe. StreamLocalBindUnlink
+    // defaults to no on the server and a client cannot override it, so reusing
+    // a path that an unclean disconnect left behind would mean sshd could never
+    // bind it again and rash would restart for ever against a dead forward.
+    let dir = SockDir::new("rotate");
+    let cfg = config_with("unix", &[("RASH_SOCKET_DIR", dir.as_str())]);
+    let monitor = Monitor::bind(&cfg).await.expect("bind the monitor");
+
+    let first = monitor.next_forwards();
+    let second = monitor.next_forwards();
+    assert_ne!(first, second, "the remote socket path must not be reused");
+
+    // Only the remote half moves; rash's own sockets stay put for the run.
+    let flat = |v: &[std::ffi::OsString]| {
+        v.iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+    let (a, b) = (flat(&first), flat(&second));
+    assert_eq!(a[0], "-L");
+    assert_eq!(a[2], "-R");
+    assert!(a[1].starts_with(&format!("{}/rash-", dir.as_str())));
+    assert!(b[1].starts_with(&format!("{}/rash-", dir.as_str())));
+}
+
 #[tokio::test]
 async fn a_disabled_monitor_is_never_probed() {
     let cfg = config_for("0", "60");
     let monitor = Monitor::bind(&cfg).await.expect("bind the monitor");
     assert!(!monitor.enabled());
-    assert!(matches!(monitor, Monitor::Disabled));
+    assert!(
+        monitor.listener_fd().is_none(),
+        "a disabled monitor should not be listening on anything"
+    );
 }
 
 #[tokio::test]
@@ -159,11 +254,9 @@ async fn the_listener_is_close_on_exec() {
     let cfg = config_for(&port.to_string(), "60");
     let monitor = Monitor::bind(&cfg).await.expect("bind the monitor");
 
-    let Monitor::Loop { listener, .. } = &monitor else {
-        panic!("expected a loop monitor");
-    };
-    // SAFETY: the descriptor is owned by the listener we are still holding.
-    let flags = unsafe { libc::fcntl(listener.as_raw_fd(), libc::F_GETFD) };
+    let fd = monitor.listener_fd().expect("a loop monitor listens");
+    // SAFETY: the descriptor is owned by the monitor we are still holding.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     assert!(flags >= 0, "F_GETFD failed");
     assert!(
         flags & libc::FD_CLOEXEC != 0,

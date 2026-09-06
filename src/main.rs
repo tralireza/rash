@@ -8,8 +8,9 @@
 use rash::config::{self, Config, ConfigError, LogTarget, ProcessEnv, Resolved};
 use rash::pidfile::PidFile;
 use rash::supervise::{self, Verdict};
-use rash::{cli, daemon, log, log_info};
+use rash::{cli, daemon, log, log_info, settings};
 use std::io::{self, Write};
+use std::path::Path;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
@@ -22,10 +23,16 @@ usage: rash [-V] [-M monitor_port[:echo_port]] [-f] [SSH_OPTIONS]
         to ssh. Implies a gate time of 0.
     -V  print version and exit.
 
-    --dry-run  print the ssh command and resolved settings, then exit.
-    --monitor SPEC  as -M, but takes precedence over it.
+    --dry-run       print the ssh command and resolved settings, then exit.
+    --monitor SPEC  as -M, but takes precedence over it. Also accepts `unix`,
+                    which runs the monitor loop over UNIX-domain sockets so
+                    there are no ports to pick on either machine.
+    --session NAME  take settings from [session.NAME] in the config file.
+    --config PATH   use this config file instead of the default.
+    --list          list the config file's sessions and exit.
 
-All other options are passed through to ssh unchanged.
+All other options are passed through to ssh unchanged. Long options are always
+rash's own, since ssh has none; everything after a `--` belongs to ssh.
 
 Environment variables (each also accepted as RASH_*, which takes precedence):
 
@@ -42,7 +49,22 @@ Environment variables (each also accepted as RASH_*, which takes precedence):
     AUTOSSH_POLL         seconds between connection checks (600)
     AUTOSSH_PORT         monitor port; overrides -M
 
-rash-only variables: RASH_KILL_TIMEOUT, RASH_MONITOR_HOST, RASH_TOUCH_PIDFILE.
+rash-only variables:
+
+    RASH_KILL_TIMEOUT      seconds a child gets to honour SIGTERM before it is
+                           killed outright (5)
+    RASH_LOG               syslog, stderr, or a path
+    RASH_LOG_FORMAT        text (default) or json
+    RASH_MONITOR_HOST      address the monitor forwards use (127.0.0.1)
+    RASH_REMOTE_SOCKET_DIR directory for the remote monitor socket (/tmp)
+    RASH_SOCKET_DIR        directory for the local monitor sockets
+    RASH_SSH_PATH          path to ssh, as AUTOSSH_PATH
+    RASH_TOUCH_PIDFILE     touch the pid file on every poll
+
+The config file is $XDG_CONFIG_HOME/rash/config.toml, or
+~/.config/rash/config.toml. It is optional, and is the lowest layer of the
+precedence stack: flag, then RASH_*, then AUTOSSH_*, then [session.NAME], then
+[defaults], then the built-in default.
 ";
 
 fn main() -> ExitCode {
@@ -66,17 +88,38 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         print!("{USAGE}");
         return Ok(ExitCode::SUCCESS);
     }
+    let config_path = inv
+        .config
+        .clone()
+        .unwrap_or_else(|| config::config_file_path(&ProcessEnv));
+    // A missing config file is normal: most runs are entirely command line.
+    let file = settings::load(&config_path)?;
+
+    if inv.list {
+        list_sessions(&config_path, &file);
+        return Ok(ExitCode::SUCCESS);
+    }
+
     // autossh insists on both a monitor port and something to hand ssh
-    // (autossh.c:334-335); a bare `rash` is a usage error, not a crash.
-    if inv.ssh_args.is_empty() {
+    // (autossh.c:334-335); a bare `rash` is a usage error, not a crash. A named
+    // session can supply the arguments instead of the command line.
+    if inv.ssh_args.is_empty() && inv.session.is_none() {
         return Ok(usage());
     }
 
-    let mut resolved = match config::resolve(inv, &ProcessEnv) {
+    let mut resolved = match config::resolve_with(inv, &ProcessEnv, &file) {
         Ok(r) => r,
         Err(ConfigError::NoMonitorPort) => return Ok(usage()),
         Err(e) => return Err(e.into()),
     };
+
+    if resolved.config.ssh_args.is_empty() {
+        return Err(
+            "nothing to hand ssh: give arguments on the command line, or set \
+                    ssh_args in the session"
+                .into(),
+        );
+    }
 
     if resolved.config.dry_run {
         print_plan(&resolved);
@@ -134,6 +177,18 @@ fn usage() -> ExitCode {
     ExitCode::FAILURE
 }
 
+fn list_sessions(path: &Path, file: &settings::File) {
+    let names = file.session_names();
+    if names.is_empty() {
+        println!("no sessions defined in {}", path.display());
+        return;
+    }
+    println!("sessions in {}:", path.display());
+    for n in names {
+        println!("    {n}");
+    }
+}
+
 /// `--dry-run`: show exactly what would be executed and with what settings.
 fn print_plan(r: &Resolved) {
     let c = &r.config;
@@ -143,8 +198,15 @@ fn print_plan(r: &Resolved) {
         env!("CARGO_PKG_VERSION")
     );
 
+    let remote = c
+        .unix
+        .as_ref()
+        .map(config::remote_sock_example)
+        .unwrap_or_default();
+    let argv = c.ssh_argv(c.monitor.forwards(c.monitor_host, c.unix.as_ref(), &remote));
+
     print!("ssh command:\n    {}", cli::quote(c.ssh_path.as_os_str()));
-    for a in &c.ssh_args {
+    for a in &argv {
         print!(" {}", cli::quote(a));
     }
     println!("\n");
@@ -152,7 +214,17 @@ fn print_plan(r: &Resolved) {
     let or_none = |s: String| if s.is_empty() { "(none)".to_owned() } else { s };
 
     println!("monitor:       {}", c.monitor);
-    println!("monitor host:  {}", c.monitor_host);
+    match &c.unix {
+        Some(u) => {
+            println!("  local out:   {}", u.local_out.display());
+            println!("  local in:    {}", u.local_in.display());
+            println!(
+                "  remote:      {}  (fresh on every start)",
+                remote.display()
+            );
+        }
+        None => println!("monitor host:  {}", c.monitor_host),
+    }
     println!(
         "poll:          {}s (first {}s)",
         c.poll.as_secs(),
@@ -194,8 +266,9 @@ fn print_plan(r: &Resolved) {
     );
     println!("message:       {}", or_none(c.message.clone()));
     println!(
-        "log:           {} at level {}{}",
+        "log:           {} as {} at level {}{}",
         c.log.target,
+        c.log.format,
         c.log.level,
         if c.log.also_stderr {
             " (also stderr)"

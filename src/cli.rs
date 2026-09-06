@@ -13,6 +13,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::PathBuf;
 
 /// Short options that take a value, from the ssh(1) synopsis (OpenSSH 10.3p1):
 ///
@@ -46,6 +47,12 @@ pub struct Invocation {
     pub version: bool,
     pub help: bool,
     pub dry_run: bool,
+    /// `--list`: print the config file's session names and exit.
+    pub list: bool,
+    /// `--session NAME`: take settings from `[session.NAME]` in the config file.
+    pub session: Option<String>,
+    /// `--config PATH`: use this config file rather than the default one.
+    pub config: Option<PathBuf>,
     /// Arguments for ssh, in order, with `-M`, `-f` and `-V` removed.
     pub ssh_args: Vec<OsString>,
     /// Where the `-L`/`-R` monitor forwards belong: the position `-M` occupied,
@@ -208,9 +215,23 @@ fn parse_long(inv: &mut Invocation, argv: &[OsString], i: usize) -> Result<usize
             inv.dry_run = true;
             Ok(1)
         }
+        "list" => {
+            inv.list = true;
+            Ok(1)
+        }
         "monitor" => {
             let (v, step) = value_for(&name, inline, argv, i)?;
             inv.monitor_long = Some(v);
+            Ok(step)
+        }
+        "session" => {
+            let (v, step) = value_for(&name, inline, argv, i)?;
+            inv.session = Some(v.to_string_lossy().into_owned());
+            Ok(step)
+        }
+        "config" => {
+            let (v, step) = value_for(&name, inline, argv, i)?;
+            inv.config = Some(PathBuf::from(v));
             Ok(step)
         }
         _ => Err(ParseError::UnknownLongOption(format!("--{name}"))),
@@ -233,10 +254,15 @@ fn value_for(
     }
 }
 
-/// Insert the monitor port forwards at the position `-M` occupied.
+/// Splice the monitor forwards into `args` at `at`, clamped to the end.
+pub fn splice_forwards(args: &mut Vec<OsString>, at: usize, forwards: Vec<OsString>) {
+    let at = at.min(args.len());
+    args.splice(at..at, forwards);
+}
+
+/// Insert the monitor forwards at the position `-M` occupied.
 pub fn inject_forwards(inv: &mut Invocation, forwards: Vec<OsString>) {
-    let at = inv.inject_at.min(inv.ssh_args.len());
-    inv.ssh_args.splice(at..at, forwards);
+    splice_forwards(&mut inv.ssh_args, inv.inject_at, forwards);
 }
 
 /// Render an argv the way a shell would need it written, for `--dry-run`.

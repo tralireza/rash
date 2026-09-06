@@ -28,7 +28,11 @@ required-features = ["test-harness"]
 
 [dependencies]
 libc = "0.2"
-# serde / serde_json / toml arrive with the config file and JSON log sink (M4).
+serde = { version = "1", features = ["derive"] }
+# Only for escaping the JSON log sink; the messages are ours, but they carry
+# paths and OS error strings that can hold quotes and backslashes.
+serde_json = "1"
+toml = "0.9"
 tokio = { version = "1", features = [
   "rt",
   "macros",
@@ -38,6 +42,11 @@ tokio = { version = "1", features = [
   "time",
   "io-util",
 ] }
+
+[dev-dependencies]
+# Already in the tree; the tests use it to check the JSON log sink for real
+# rather than by string matching.
+serde_json = "1"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

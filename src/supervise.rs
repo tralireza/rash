@@ -220,7 +220,7 @@ pub async fn run(cfg: &Config, pid_file: Option<&PidFile>) -> Verdict {
             log_info!("starting ssh (count {start_count} of {})", cfg.max_start);
         }
 
-        let mut child = match spawn(cfg) {
+        let mut child = match spawn(cfg, &monitor) {
             Ok(c) => c,
             Err(e) => {
                 // Rust reports a failed exec back through spawn(), so unlike
@@ -329,11 +329,15 @@ async fn watch(
     }
 }
 
-fn spawn(cfg: &Config) -> io::Result<Child> {
+fn spawn(cfg: &Config, monitor: &Monitor) -> io::Result<Child> {
+    // The forwards are built per start rather than once: the UNIX arrangement
+    // needs a different remote socket path each time.
+    let argv = cfg.ssh_argv(monitor.next_forwards());
+
     // No process_group() call: the child shares rash's group, as autossh's
     // fork/execvp child does, so a terminal ^C reaches both.
     Command::new(&cfg.ssh_path)
-        .args(&cfg.ssh_args)
+        .args(&argv)
         .kill_on_drop(false)
         .spawn()
 }

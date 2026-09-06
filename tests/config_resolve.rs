@@ -1,9 +1,10 @@
 //! Configuration resolution: precedence, validation, and the derived clamps.
 
 use rash::cli;
-use rash::config::{self, ConfigError, Level, LogTarget, Monitor, Resolved};
+use rash::config::{self, ConfigError, Format, Level, LogTarget, Monitor, Resolved};
 use std::ffi::OsString;
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 fn try_resolve(args: &[&str], env: &[(&str, &str)]) -> Result<Resolved, ConfigError> {
@@ -15,10 +16,16 @@ fn resolve(args: &[&str], env: &[(&str, &str)]) -> Resolved {
     try_resolve(args, env).expect("should resolve")
 }
 
+/// The argv rash would actually exec: the user's arguments with the monitor
+/// forwards spliced in where `-M` stood.
 fn ssh_args(args: &[&str], env: &[(&str, &str)]) -> Vec<String> {
-    resolve(args, env)
-        .config
-        .ssh_args
+    let c = resolve(args, env).config;
+    let remote = c
+        .unix
+        .as_ref()
+        .map(config::remote_sock_example)
+        .unwrap_or_default();
+    c.ssh_argv(c.monitor.forwards(c.monitor_host, c.unix.as_ref(), &remote))
         .iter()
         .map(|a| a.to_string_lossy().into_owned())
         .collect()
@@ -287,6 +294,174 @@ fn rejections() {
         try_resolve(&["-N", "host"], &[]),
         Err(ConfigError::NoMonitorPort)
     );
+}
+
+const NO_ENV: &[(&str, &str)] = &[];
+
+const CONFIG: &str = r#"
+[defaults]
+poll = 300
+gatetime = 15
+
+[session.homelab]
+monitor  = 20000
+ssh_args = ["-N", "-R", "2200:localhost:22", "me@homelab"]
+poll     = 60
+message  = "homelab"
+
+[session.jump]
+monitor    = "unix"
+ssh_args   = ["-N", "me@jump"]
+log_format = "json"
+"#;
+
+fn with_config(args: &[&str], env: &[(&str, &str)]) -> Result<Resolved, ConfigError> {
+    let file = rash::settings::parse(CONFIG).expect("the test config should parse");
+    let inv = cli::parse(args.iter().map(OsString::from)).expect("should parse");
+    config::resolve_with(inv, env, &file)
+}
+
+#[test]
+fn a_session_layers_over_defaults() {
+    let c = with_config(&["--session", "homelab"], NO_ENV)
+        .expect("should resolve")
+        .config;
+
+    assert_eq!(c.monitor, Monitor::Loop { port: 20000 });
+    // The session's own value wins...
+    assert_eq!(secs(c.poll), 60);
+    // ...and anything it leaves out comes from [defaults].
+    assert_eq!(secs(c.gate_time), 15);
+    assert_eq!(c.message, "homelab");
+
+    // A session may carry the ssh arguments, so nothing else is needed on the
+    // command line.
+    let args: Vec<String> = c
+        .ssh_args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(args, ["-N", "-R", "2200:localhost:22", "me@homelab"]);
+}
+
+#[test]
+fn the_environment_outranks_the_config_file() {
+    // The file is the bottom of the precedence stack, above only the built-ins.
+    let c = with_config(&["--session", "homelab"], &[("AUTOSSH_POLL", "5")])
+        .expect("should resolve")
+        .config;
+    assert_eq!(secs(c.poll), 5);
+
+    // ...and a flag outranks the environment in turn.
+    let c = with_config(
+        &["--session", "homelab", "--monitor", "30000"],
+        &[("AUTOSSH_PORT", "40000")],
+    )
+    .expect("should resolve")
+    .config;
+    assert_eq!(c.monitor, Monitor::Loop { port: 30000 });
+}
+
+#[test]
+fn a_session_can_select_the_unix_monitor_and_json_logs() {
+    let c = with_config(&["--session", "jump"], NO_ENV)
+        .expect("should resolve")
+        .config;
+    assert_eq!(c.monitor, Monitor::Unix);
+    assert_eq!(c.log.format, Format::Json);
+    assert!(c.unix.is_some());
+    // Still inherits the defaults it did not override.
+    assert_eq!(secs(c.poll), 300);
+}
+
+#[test]
+fn an_unknown_session_names_the_ones_that_exist() {
+    match with_config(&["--session", "nope"], NO_ENV) {
+        Err(ConfigError::Invalid(m)) => {
+            assert!(m.contains("no session named \"nope\""), "got {m:?}");
+            assert!(
+                m.contains("homelab"),
+                "should list what is available: {m:?}"
+            );
+        }
+        other => panic!("expected a rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_unknown_log_format_is_rejected() {
+    let inv = cli::parse(["-M", "0", "host"].iter().map(OsString::from)).expect("parse");
+    let env: &[(&str, &str)] = &[("RASH_LOG_FORMAT", "yaml")];
+    match config::resolve(inv, env) {
+        Err(ConfigError::Invalid(m)) => assert!(m.contains("invalid log format"), "got {m:?}"),
+        other => panic!("expected a rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn log_targets_and_levels_by_name() {
+    let c = resolve(&["-M", "0", "host"], &[("RASH_LOG", "stderr")]).config;
+    assert_eq!(c.log.target, LogTarget::Stderr);
+
+    let c = resolve(&["-M", "0", "host"], &[("RASH_LOG", "syslog")]).config;
+    assert_eq!(c.log.target, LogTarget::Syslog);
+
+    // Names as well as autossh's 0-7 numbers.
+    let c = resolve(&["-M", "0", "host"], &[("AUTOSSH_LOGLEVEL", "debug")]).config;
+    assert_eq!(c.log.level, Level::Debug);
+}
+
+#[test]
+fn the_unix_monitor_forwards_sockets_not_ports() {
+    let env = [
+        ("RASH_SOCKET_DIR", "/tmp/rash-unit"),
+        ("RASH_REMOTE_SOCKET_DIR", "/tmp"),
+    ];
+    let c = resolve(&["-M", "unix", "-N", "host"], &env).config;
+    assert_eq!(c.monitor, Monitor::Unix);
+
+    let pid = std::process::id();
+    let u = c.unix.as_ref().expect("unix paths should be resolved");
+    assert_eq!(
+        u.local_out,
+        PathBuf::from(format!("/tmp/rash-unit/rash-{pid}-out.sock"))
+    );
+    assert_eq!(
+        u.local_in,
+        PathBuf::from(format!("/tmp/rash-unit/rash-{pid}-in.sock"))
+    );
+
+    // -L local_socket:remote_socket and -R remote_socket:local_socket, both
+    // straight out of ssh(1). No ports anywhere.
+    let remote = Path::new("/tmp/rash-deadbeef.sock");
+    let f: Vec<String> = c
+        .monitor
+        .forwards(c.monitor_host, c.unix.as_ref(), remote)
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        f,
+        [
+            "-L",
+            &format!("/tmp/rash-unit/rash-{pid}-out.sock:/tmp/rash-deadbeef.sock"),
+            "-R",
+            &format!("/tmp/rash-deadbeef.sock:/tmp/rash-unit/rash-{pid}-in.sock"),
+        ]
+    );
+}
+
+#[test]
+fn an_over_long_socket_path_is_rejected_up_front() {
+    // sun_path is ~104 bytes. Left to bind() this surfaces as a baffling error
+    // from inside the socket layer, so it is caught while resolving instead.
+    let long = format!("/tmp/{}", "x".repeat(120));
+    match try_resolve(&["-M", "unix", "host"], &[("RASH_SOCKET_DIR", &long)]) {
+        Err(ConfigError::Invalid(m)) => {
+            assert!(m.contains("UNIX socket allows"), "got {m:?}")
+        }
+        other => panic!("expected a rejection, got {other:?}"),
+    }
 }
 
 #[test]

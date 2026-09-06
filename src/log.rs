@@ -8,8 +8,8 @@
 //! passes the message *as* the format string (autossh.c:1797), which misbehaves
 //! on any log line containing a `%`.
 
-use crate::config::{Level, Log, LogTarget};
-use std::ffi::CString;
+use crate::config::{Format, Level, Log, LogTarget};
+use std::ffi::{CStr, CString};
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -19,6 +19,7 @@ static LOGGER: OnceLock<Logger> = OnceLock::new();
 
 struct Logger {
     level: Level,
+    format: Format,
     also_stderr: bool,
     sink: Mutex<Sink>,
 }
@@ -45,6 +46,7 @@ pub fn init(cfg: &Log) -> io::Result<()> {
 
     let _ = LOGGER.set(Logger {
         level: cfg.level,
+        format: cfg.format,
         also_stderr: cfg.also_stderr,
         sink: Mutex::new(sink),
     });
@@ -83,27 +85,45 @@ pub fn emit(level: Level, args: fmt::Arguments<'_>) {
             }
         }
         Sink::File(f) => {
-            let _ = writeln!(f, "{} {msg}", prefix());
+            let _ = writeln!(f, "{}", line(logger.format, level, &msg));
             let _ = f.flush();
         }
         Sink::Stderr => {
-            let _ = writeln!(io::stderr(), "{} {msg}", prefix());
+            let _ = writeln!(io::stderr(), "{}", line(logger.format, level, &msg));
         }
     }
 
     // AUTOSSH_DEBUG mirrors everything to stderr as well.
     if logger.also_stderr && !matches!(&*sink, Sink::Stderr) {
-        let _ = writeln!(io::stderr(), "{} {msg}", prefix());
+        let _ = writeln!(io::stderr(), "{}", line(logger.format, level, &msg));
     }
 }
 
-fn prefix() -> String {
-    format!("{} rash[{}]:", timestamp(), std::process::id())
+/// One rendered log line.
+///
+/// The text shape is autossh's, so existing log parsing keeps working. JSON is
+/// for anything that would rather not parse it.
+fn line(format: Format, level: Level, msg: &str) -> String {
+    match format {
+        Format::Text => format!(
+            "{} rash[{}]: {msg}",
+            timestamp(c"%Y/%m/%d %H:%M:%S"),
+            std::process::id()
+        ),
+        Format::Json => serde_json::json!({
+            "ts": timestamp(c"%Y-%m-%dT%H:%M:%S%z"),
+            "level": level.to_string(),
+            "pid": std::process::id(),
+            "msg": msg,
+        })
+        .to_string(),
+    }
 }
 
-/// Local time as `%Y/%m/%d %H:%M:%S`, matching autossh's `timestr()`.
-fn timestamp() -> String {
-    let mut buf = [0u8; 32];
+/// Local time, formatted by `strftime(3)` — the same source autossh's
+/// `timestr()` uses, so the text sink matches it character for character.
+fn timestamp(fmt: &CStr) -> String {
+    let mut buf = [0u8; 64];
 
     // SAFETY: `time(NULL)` is always valid; `tm` is a plain C struct that
     // localtime_r fills in, and a zeroed one is a valid starting value.
@@ -114,12 +134,7 @@ fn timestamp() -> String {
         if libc::localtime_r(&now, &mut tm).is_null() {
             return String::new();
         }
-        libc::strftime(
-            buf.as_mut_ptr().cast(),
-            buf.len(),
-            c"%Y/%m/%d %H:%M:%S".as_ptr(),
-            &tm,
-        )
+        libc::strftime(buf.as_mut_ptr().cast(), buf.len(), fmt.as_ptr(), &tm)
     };
 
     String::from_utf8_lossy(&buf[..n]).into_owned()

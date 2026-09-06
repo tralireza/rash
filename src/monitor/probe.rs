@@ -72,7 +72,7 @@ fn hostname() -> String {
 ///
 /// autossh seeds `random()` with `pid ^ tv_usec ^ tv_sec` (autossh.c:721-722),
 /// which is guessable; `/dev/urandom` costs nothing here.
-fn nonce() -> u64 {
+pub(crate) fn nonce() -> u64 {
     let mut buf = [0u8; 8];
     if let Ok(mut f) = File::open("/dev/urandom")
         && f.read_exact(&mut buf).is_ok()
