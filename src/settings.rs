@@ -19,9 +19,27 @@
 //! Everything a section can set is also settable by flag or environment
 //! variable, and those win — the file is the lowest layer of the precedence
 //! stack, above only the built-in defaults.
+//!
+//! # Key names
+//!
+//! A key is its environment variable with the `AUTOSSH_`/`RASH_` prefix removed
+//! and lowercased, which is why `gatetime` and `maxlifetime` run together while
+//! `first_poll` and `kill_timeout` do not — `AUTOSSH_GATETIME` has no
+//! underscore and `AUTOSSH_FIRST_POLL` does. It looks inconsistent and is not:
+//! do not "tidy" one group to match the other, or every key becomes a guess.
+//! `ssh_args` is the sole exception, having no variable of its own.
+//!
+//! `AUTOSSH_DEBUG` and `RASH_TOUCH_PIDFILE` deliberately have no key here: both
+//! are switches for a single run, not settings for a tunnel.
+//!
+//! `deny_unknown_fields` is on, so a mistyped key is a hard error rather than a
+//! setting that silently does nothing. That makes the list in rash(1) the
+//! contract; keep the two in step.
 
-use serde::Deserialize;
+use serde::de::{self, Unexpected, Visitor};
+use serde::{Deserialize, Deserializer};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -37,8 +55,7 @@ pub struct File {
 }
 
 /// A monitor spec, which TOML may express as a bare integer or as a string.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Spec {
     Port(u32),
     Text(String),
@@ -50,6 +67,43 @@ impl Spec {
             Self::Port(n) => n.to_string(),
             Self::Text(s) => s.clone(),
         }
+    }
+}
+
+/// Hand-written so a bad value says what was wanted.
+///
+/// `#[serde(untagged)]` gets the parsing right but reports a failure as "data
+/// did not match any variant of untagged enum Spec", which tells a user nothing
+/// about what to write instead. Every other error rash produces is a sentence.
+impl<'de> Deserialize<'de> for Spec {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        struct SpecVisitor;
+
+        impl Visitor<'_> for SpecVisitor {
+            type Value = Spec;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a monitor port, or \"port:echo_port\", \"unix\", or 0")
+            }
+
+            fn visit_u64<E: de::Error>(self, n: u64) -> Result<Spec, E> {
+                u32::try_from(n)
+                    .map(Spec::Port)
+                    .map_err(|_| E::invalid_value(Unexpected::Unsigned(n), &self))
+            }
+
+            fn visit_i64<E: de::Error>(self, n: i64) -> Result<Spec, E> {
+                u32::try_from(n)
+                    .map(Spec::Port)
+                    .map_err(|_| E::invalid_value(Unexpected::Signed(n), &self))
+            }
+
+            fn visit_str<E: de::Error>(self, s: &str) -> Result<Spec, E> {
+                Ok(Spec::Text(s.to_owned()))
+            }
+        }
+
+        de.deserialize_any(SpecVisitor)
     }
 }
 

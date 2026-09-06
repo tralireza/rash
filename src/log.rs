@@ -75,6 +75,11 @@ pub fn emit(level: Level, args: fmt::Arguments<'_>) {
     // itself is still usable, and dropping log lines would be worse.
     let mut sink = logger.sink.lock().unwrap_or_else(|e| e.into_inner());
 
+    // Rendered once, not once per sink: `line` stamps the current time, so
+    // rendering again for the stderr mirror below can date the two copies of
+    // one message a second apart.
+    let rendered = line(logger.format, level, &msg);
+
     match &mut *sink {
         Sink::Syslog => {
             if let Ok(c) = CString::new(msg.as_bytes()) {
@@ -85,17 +90,17 @@ pub fn emit(level: Level, args: fmt::Arguments<'_>) {
             }
         }
         Sink::File(f) => {
-            let _ = writeln!(f, "{}", line(logger.format, level, &msg));
+            let _ = writeln!(f, "{rendered}");
             let _ = f.flush();
         }
         Sink::Stderr => {
-            let _ = writeln!(io::stderr(), "{}", line(logger.format, level, &msg));
+            let _ = writeln!(io::stderr(), "{rendered}");
         }
     }
 
     // AUTOSSH_DEBUG mirrors everything to stderr as well.
     if logger.also_stderr && !matches!(&*sink, Sink::Stderr) {
-        let _ = writeln!(io::stderr(), "{}", line(logger.format, level, &msg));
+        let _ = writeln!(io::stderr(), "{rendered}");
     }
 }
 

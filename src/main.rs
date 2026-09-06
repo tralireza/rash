@@ -10,6 +10,7 @@ use rash::pidfile::PidFile;
 use rash::supervise::{self, Verdict};
 use rash::{cli, daemon, log, log_info, settings};
 use std::io::{self, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -30,6 +31,8 @@ usage: rash [-V] [-M monitor_port[:echo_port]] [-f] [SSH_OPTIONS]
     --session NAME  take settings from [session.NAME] in the config file.
     --config PATH   use this config file instead of the default.
     --list          list the config file's sessions and exit.
+    --help          print this message and exit.
+    --version       as -V.
 
 All other options are passed through to ssh unchanged. Long options are always
 rash's own, since ssh has none; everything after a `--` belongs to ssh.
@@ -65,6 +68,10 @@ The config file is optional. rash reads ~/.rash.toml if it exists, and
 otherwise $XDG_CONFIG_HOME/rash/config.toml (or ~/.config/rash/config.toml).
 It is the lowest layer of the precedence stack: flag, then RASH_*, then
 AUTOSSH_*, then [session.NAME], then [defaults], then the built-in default.
+
+Note that [defaults] applies to every run, including ones that name no
+session, so a config file changes what a bare `rash -M ... host` does.
+autossh has no config file; --config /dev/null ignores yours.
 ";
 
 fn main() -> ExitCode {
@@ -137,6 +144,13 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     if resolved.config.background {
         daemon::daemonize()?;
+        // The UNIX monitor's socket names carry the pid, and the fork just
+        // changed it. Left alone they would name the pre-fork process, which no
+        // longer exists — the same reason the pid file is written below rather
+        // than above.
+        if resolved.config.unix.is_some() {
+            resolved.config.unix = Some(config::unix_paths(&ProcessEnv)?);
+        }
     }
 
     log::init(&resolved.config.log)?;
@@ -165,6 +179,16 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 }
 
 fn absolutize(cfg: &mut Config) {
+    // A bare name such as `ssh` is a PATH lookup, which the chdir leaves alone;
+    // execvp only skips PATH when the name contains a slash, and that is
+    // exactly the case that gets resolved against the working directory. So
+    // `AUTOSSH_PATH=ssh` keeps working and `AUTOSSH_PATH=./bin/ssh` stops
+    // meaning `/bin/ssh` the moment we daemonise.
+    if cfg.ssh_path.as_os_str().as_bytes().contains(&b'/')
+        && let Ok(abs) = std::path::absolute(&cfg.ssh_path)
+    {
+        cfg.ssh_path = abs;
+    }
     if let Some(p) = &cfg.pid_file
         && let Ok(abs) = std::path::absolute(p)
     {

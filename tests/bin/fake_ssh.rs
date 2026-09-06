@@ -18,12 +18,21 @@
 //! then moves no bytes at all, which is what a wedged tunnel looks like from the
 //! outside — the case the whole monitor exists to catch.
 //!
+//! Both TCP and UNIX-domain forwards are understood, chosen by the shape of the
+//! `-L` value: `port:host:port` is TCP, `/path:/path` is a socket pair. Standing
+//! in for the UNIX arrangement means playing the whole far side — ssh's local
+//! listener, sshd's remote one, and the link between them — so the socket rash
+//! writes to is bound here and its bytes are handed straight to the socket rash
+//! is listening on.
+//!
 //! It is built only with the `test-harness` feature, which is on by default but
 //! can be turned off so `cargo install` produces just `rash`.
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
@@ -48,23 +57,38 @@ fn main() {
     }
 }
 
-/// One end of a port forward, as it appears in `-L`/`-R`: `listen:host:target`.
-struct Forward {
-    listen: u16,
-    target: u16,
+/// One end of a forward, as it appears in `-L`/`-R`.
+///
+/// TCP is `listen_port:host:target_port`; UNIX is `listen_path:target_path`.
+enum Forward {
+    Tcp { listen: u16, target: u16 },
+    Unix { listen: PathBuf, target: PathBuf },
 }
 
-/// Pull a forward out of argv. Splitting from both ends rather than on every
-/// colon keeps a bracketed IPv6 host in the middle intact.
+/// Pull a forward out of argv.
+///
+/// A leading `/` says the value is a socket pair, which is unambiguous: ssh's
+/// TCP forms all begin with a port number or a bind address. For the TCP form,
+/// splitting from both ends rather than on every colon keeps a bracketed IPv6
+/// host in the middle intact.
 fn forward(flag: &str) -> Option<Forward> {
     let argv: Vec<String> = std::env::args().collect();
     let spec = argv
         .iter()
         .position(|a| a == flag)
         .and_then(|i| argv.get(i + 1))?;
+
+    if spec.starts_with('/') {
+        let (listen, target) = spec.split_once(':')?;
+        return Some(Forward::Unix {
+            listen: PathBuf::from(listen),
+            target: PathBuf::from(target),
+        });
+    }
+
     let (listen, rest) = spec.split_once(':')?;
     let (_host, target) = rest.rsplit_once(':')?;
-    Some(Forward {
+    Some(Forward::Tcp {
         listen: listen.parse().ok()?,
         target: target.parse().ok()?,
     })
@@ -82,55 +106,175 @@ fn start_tunnel() {
         other => other,
     };
 
-    let Some(l) = left else { return };
+    match (left, right) {
+        (Some(Forward::Tcp { listen, .. }), r) => {
+            let back = match r {
+                Some(Forward::Tcp { target, .. }) => Some(target),
+                _ => None,
+            };
+            tcp_tunnel(mode, listen, back);
+        }
+        // The -L value is `local_out:remote_sock` and the -R value is
+        // `remote_sock:local_in`, so the socket to hand the bytes back to is
+        // the -R target. Nothing ever binds the remote path: this process is
+        // standing in for both ends of the link, so there is no link to cross.
+        (Some(Forward::Unix { listen, .. }), r) => {
+            let back = match r {
+                Some(Forward::Unix { target, .. }) => Some(target),
+                _ => None,
+            };
+            unix_tunnel(mode, listen, back);
+        }
+        (None, _) => {}
+    }
+}
 
+fn tcp_tunnel(mode: &str, listen: u16, back_to: Option<u16>) {
     match mode {
         // Local port -> the port the remote's -R forward would deliver to.
         "loop" => {
-            let Some(r) = right else { return };
-            spawn_server(l.listen, move |mut inbound| {
-                let Ok(mut outbound) = TcpStream::connect(("127.0.0.1", r.target)) else {
-                    return;
-                };
-                let (Ok(mut a), Ok(mut b)) = (inbound.try_clone(), outbound.try_clone()) else {
-                    return;
-                };
-                thread::spawn(move || {
-                    let _ = std::io::copy(&mut a, &mut b);
-                });
-                let _ = std::io::copy(&mut outbound, &mut inbound);
-            });
+            let Some(target) = back_to else { return };
+            spawn_server(
+                move || TcpListener::bind(("127.0.0.1", listen)),
+                format!("127.0.0.1:{listen}"),
+                move |mut inbound| {
+                    let Ok(mut outbound) = TcpStream::connect(("127.0.0.1", target)) else {
+                        return;
+                    };
+                    splice(&mut inbound, &mut outbound);
+                },
+            );
         }
-        "echo" => spawn_server(l.listen, |mut s| {
-            let Ok(mut back) = s.try_clone() else { return };
-            let _ = std::io::copy(&mut back, &mut s);
-        }),
+        "echo" => spawn_server(
+            move || TcpListener::bind(("127.0.0.1", listen)),
+            format!("127.0.0.1:{listen}"),
+            echo,
+        ),
         // Accept, then do nothing. poll() cannot distinguish this from a healthy
         // but idle tunnel, which is why the probe needs a timeout.
-        "blackhole" => spawn_server(l.listen, |s| {
-            thread::sleep(Duration::from_secs(3600));
-            drop(s);
-        }),
+        "blackhole" => spawn_server(
+            move || TcpListener::bind(("127.0.0.1", listen)),
+            format!("127.0.0.1:{listen}"),
+            blackhole,
+        ),
         _ => {}
     }
 }
 
-fn spawn_server(port: u16, handle: impl Fn(TcpStream) + Send + Copy + 'static) {
+fn unix_tunnel(mode: &str, listen: PathBuf, back_to: Option<PathBuf>) {
+    // rash unlinks this before every start, so there should be nothing here —
+    // but a stale socket would fail the bind and look like a hung tunnel.
+    let _ = std::fs::remove_file(&listen);
+    let name = listen.display().to_string();
+    let bind = {
+        let listen = listen.clone();
+        move || UnixListener::bind(&listen)
+    };
+
+    match mode {
+        "loop" => {
+            let Some(target) = back_to else { return };
+            spawn_server(bind, name, move |mut inbound| {
+                let Ok(mut outbound) = UnixStream::connect(&target) else {
+                    return;
+                };
+                splice(&mut inbound, &mut outbound);
+            });
+        }
+        "echo" => spawn_server(bind, name, echo),
+        "blackhole" => spawn_server(bind, name, blackhole),
+        _ => {}
+    }
+}
+
+/// Copy in both directions until either side closes.
+fn splice<S: Splittable>(inbound: &mut S, outbound: &mut S) {
+    let (Ok(mut a), Ok(mut b)) = (inbound.dup(), outbound.dup()) else {
+        return;
+    };
     thread::spawn(move || {
-        let listener = match TcpListener::bind(("127.0.0.1", port)) {
+        let _ = std::io::copy(&mut a, &mut b);
+    });
+    let _ = std::io::copy(outbound, inbound);
+}
+
+fn echo<S: Splittable>(mut s: S) {
+    let Ok(mut back) = s.dup() else { return };
+    let _ = std::io::copy(&mut back, &mut s);
+}
+
+fn blackhole<S: Splittable>(s: S) {
+    thread::sleep(Duration::from_secs(3600));
+    drop(s);
+}
+
+/// The little that the tunnel bodies need from a stream, so one set of them
+/// serves both `TcpStream` and `UnixStream`.
+trait Splittable: std::io::Read + std::io::Write + Send + Sized + 'static {
+    fn dup(&self) -> std::io::Result<Self>;
+}
+
+impl Splittable for TcpStream {
+    fn dup(&self) -> std::io::Result<Self> {
+        self.try_clone()
+    }
+}
+
+impl Splittable for UnixStream {
+    fn dup(&self) -> std::io::Result<Self> {
+        self.try_clone()
+    }
+}
+
+/// Accept for ever, handing each connection to `handle` on its own thread.
+///
+/// `bind` is a closure rather than a bound listener so the failure is reported
+/// from inside the spawned thread, where `name` can describe what could not be
+/// bound.
+fn spawn_server<L, S, B, H>(bind: B, name: String, handle: H)
+where
+    L: Listener<Conn = S>,
+    S: Send + 'static,
+    B: FnOnce() -> std::io::Result<L> + Send + 'static,
+    // Clone rather than Copy: the UNIX handlers capture a PathBuf.
+    H: Fn(S) + Send + Clone + 'static,
+{
+    thread::spawn(move || {
+        let listener = match bind() {
             Ok(l) => l,
             Err(e) => {
                 // Returning quietly here would surface as an unexplained probe
                 // timeout twenty seconds later in whichever test is running.
                 // Exiting makes the supervisor log it immediately instead.
-                eprintln!("fake-ssh: cannot bind 127.0.0.1:{port}: {e}");
+                eprintln!("fake-ssh: cannot bind {name}: {e}");
                 std::process::exit(70);
             }
         };
-        for conn in listener.incoming().flatten() {
+        while let Ok(conn) = listener.take() {
+            let handle = handle.clone();
             thread::spawn(move || handle(conn));
         }
     });
+}
+
+/// One `accept()`, over whichever address family.
+trait Listener: Send + 'static {
+    type Conn;
+    fn take(&self) -> std::io::Result<Self::Conn>;
+}
+
+impl Listener for TcpListener {
+    type Conn = TcpStream;
+    fn take(&self) -> std::io::Result<TcpStream> {
+        self.accept().map(|(s, _)| s)
+    }
+}
+
+impl Listener for UnixListener {
+    type Conn = UnixStream;
+    fn take(&self) -> std::io::Result<UnixStream> {
+        self.accept().map(|(s, _)| s)
+    }
 }
 
 /// Append this invocation's argv to the state file and return which start it is,

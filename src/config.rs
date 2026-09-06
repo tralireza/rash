@@ -330,7 +330,12 @@ fn socket_dir<E: EnvSource + ?Sized>(env: &E) -> PathBuf {
     PathBuf::from(format!("/tmp/rash-{uid}"))
 }
 
-fn unix_paths<E: EnvSource + ?Sized>(env: &E) -> Result<UnixPaths, ConfigError> {
+/// Resolve the local socket paths for the UNIX monitor.
+///
+/// The names carry the pid, so this has to be redone after a daemonising fork
+/// or the sockets are named after a process that no longer exists. `main` does
+/// exactly that, for the same reason it writes the pid file after the fork.
+pub fn unix_paths<E: EnvSource + ?Sized>(env: &E) -> Result<UnixPaths, ConfigError> {
     let dir = match env.var("RASH_SOCKET_DIR").filter(|d| !d.is_empty()) {
         Some(d) => PathBuf::from(d),
         None => socket_dir(env),
@@ -441,6 +446,22 @@ fn number<T: std::str::FromStr>(what: &str, s: &str) -> Result<T, ConfigError> {
         .map_err(|_| ConfigError::Invalid(format!("invalid {what} \"{s}\"")))
 }
 
+/// Parse a rash-only boolean variable.
+///
+/// `AUTOSSH_DEBUG` is deliberately not routed through here: autossh treats it
+/// as set-or-not and rash matches that. rash's own switches read their value,
+/// so `RASH_TOUCH_PIDFILE=0` means off rather than a surprising on.
+fn boolean(what: &str, v: &OsString) -> Result<bool, ConfigError> {
+    let s = as_str(what, v)?;
+    match s.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" | "off" => Ok(false),
+        "1" | "true" | "yes" | "on" => Ok(true),
+        _ => Err(ConfigError::Invalid(format!(
+            "invalid {what} \"{s}\", expected 1/0, true/false, yes/no, or on/off"
+        ))),
+    }
+}
+
 /// Resolve the command line and environment into a runnable configuration,
 /// with no config file involved.
 pub fn resolve<E: EnvSource + ?Sized>(inv: Invocation, env: &E) -> Result<Resolved, ConfigError> {
@@ -518,7 +539,7 @@ pub fn resolve_with<E: EnvSource + ?Sized>(
         }
     };
 
-    let poll_secs: u64 = match dual(env, "POLL") {
+    let mut poll_secs: u64 = match dual(env, "POLL") {
         Some(v) => {
             let s = as_str("poll time", &v)?;
             let n: u64 = number("poll time", &s)?;
@@ -544,7 +565,6 @@ pub fn resolve_with<E: EnvSource + ?Sized>(
         }
         None => section.first_poll.unwrap_or(poll_secs),
     };
-    let mut poll_secs = poll_secs;
 
     let mut gate_secs: u64 = match dual(env, "GATETIME") {
         Some(v) => {
@@ -615,7 +635,10 @@ pub fn resolve_with<E: EnvSource + ?Sized>(
         .or_else(|| section.pidfile.clone());
     // The next three have no autossh counterpart — TOUCH_PIDFILE is a compile-time
     // #define there, and the other two are rash's own — so they are RASH_-only.
-    let touch_pid_file = env.var("RASH_TOUCH_PIDFILE").is_some();
+    let touch_pid_file = match env.var("RASH_TOUCH_PIDFILE") {
+        Some(v) => boolean("touch pidfile", &v)?,
+        None => false,
+    };
 
     let kill_timeout = match env.var("RASH_KILL_TIMEOUT") {
         Some(v) => {
@@ -669,9 +692,15 @@ pub fn resolve_with<E: EnvSource + ?Sized>(
 
     // Short poll times need proportionally shorter network timeouts, or a single
     // probe could outlast the interval (autossh.c:391-396).
+    //
+    // Saturating, because the poll time is an unbounded u64 straight from the
+    // user: `AUTOSSH_POLL=18446744073709552` overflows the multiply, which
+    // panics in a debug build and — far worse — silently wraps to a 192ms
+    // timeout in a release one.
     let mut net_timeout_ms = DEFAULT_NET_TIMEOUT_MS;
-    if poll_secs * 1000 / 2 < net_timeout_ms {
-        net_timeout_ms = poll_secs * 1000 / 2;
+    let half_poll_ms = poll_secs.saturating_mul(1000) / 2;
+    if half_poll_ms < net_timeout_ms {
+        net_timeout_ms = half_poll_ms;
         warnings.push(format!(
             "short poll time: adjusting net timeouts to {net_timeout_ms}"
         ));
@@ -737,7 +766,13 @@ fn parse_monitor(spec: &str, warnings: &mut Vec<String>) -> Result<Monitor, Conf
         Some((p, e)) => {
             let n: u32 = number("echo port", e)?;
             if n == 0 || n > u32::from(u16::MAX) {
-                return Err(ConfigError::Invalid(format!("invalid echo port  \"{e}\"")));
+                // One space. autossh.c:348 has two — "invalid echo port  \"%s\"" —
+                // and this is a deliberate divergence from it, listed with the
+                // others in rash(1). Nothing can be relying on the spacing: it
+                // is a startup rejection written to stderr before a log sink
+                // even exists, so no log parser ever sees it, and rash exits
+                // non-zero either way.
+                return Err(ConfigError::Invalid(format!("invalid echo port \"{e}\"")));
             }
             (p, Some(n as u16))
         }

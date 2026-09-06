@@ -44,6 +44,30 @@ impl Drop for Scratch {
     }
 }
 
+/// A scratch directory for UNIX sockets, under `/tmp` rather than `Scratch`'s
+/// `temp_dir()`: on macOS that is a long `/var/folders/...` path which would not
+/// leave room inside the ~104-byte `sun_path`.
+struct SockDir(PathBuf);
+
+impl SockDir {
+    fn new(tag: &str) -> Self {
+        let d = PathBuf::from(format!("/tmp/rash-e{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).expect("create socket dir");
+        Self(d)
+    }
+
+    fn as_str(&self) -> &str {
+        self.0.to_str().expect("ascii path")
+    }
+}
+
+impl Drop for SockDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A rash invocation wired up to the fake ssh.
 struct Rash {
     cmd: Command,
@@ -77,6 +101,11 @@ impl Rash {
 
     fn args(mut self, a: &[&str]) -> Self {
         self.cmd.args(a);
+        self
+    }
+
+    fn cwd(mut self, d: &std::path::Path) -> Self {
+        self.cmd.current_dir(d);
         self
     }
 
@@ -307,6 +336,72 @@ fn the_monitor_forwards_reach_ssh() {
 }
 
 #[test]
+fn the_unix_monitor_works_end_to_end() {
+    // The TCP monitor gets exercised by every other test here; this is the one
+    // path that runs the whole UNIX arrangement — resolve, bind, inject the
+    // socket forwards, probe — through the real binary rather than in process.
+    let dir = SockDir::new("unixok");
+    let s = Scratch::new("unixok");
+    let mut r = Rash::new(&s)
+        .env("RASH_SOCKET_DIR", dir.as_str())
+        .env("AUTOSSH_POLL", "1")
+        .args(&["--monitor", "unix", "-N", "host"])
+        .spawn();
+
+    r.wait_until("the monitor to report a good probe", |r| {
+        r.log().contains("connection ok")
+    });
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(r.starts(), 1, "a working tunnel must not be restarted");
+
+    r.signal(libc::SIGTERM);
+    r.wait_for_exit();
+
+    // Drop removes them, and the next bind unlinks whatever is left, but a run
+    // that leaves a pair behind fills the directory one socket at a time.
+    let left: Vec<_> = fs::read_dir(dir.as_str())
+        .expect("read socket dir")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name())
+        .collect();
+    assert!(left.is_empty(), "sockets left behind: {left:?}");
+}
+
+#[test]
+fn a_wedged_unix_tunnel_triggers_a_restart() {
+    let dir = SockDir::new("unixdead");
+    let s = Scratch::new("unixdead");
+    let mut r = Rash::new(&s)
+        .env("RASH_SOCKET_DIR", dir.as_str())
+        .env("FAKE_SSH_TUNNEL", "blackhole")
+        .env("AUTOSSH_POLL", "1")
+        .env("AUTOSSH_GATETIME", "0")
+        .args(&["--monitor", "unix", "-N", "host"])
+        .spawn();
+
+    r.wait_until("ssh to be restarted", |r| r.starts() >= 2);
+    assert!(
+        r.log().contains("port down, restarting ssh"),
+        "log:\n{}",
+        r.log()
+    );
+
+    // The remote path has to move between starts, or a socket sshd could not
+    // rebind would wedge every restart from here on.
+    let recorded = fs::read_to_string(&r.state).expect("state file");
+    let remotes: Vec<&str> = recorded
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .filter_map(|spec| spec.split(':').nth(1))
+        .collect();
+    assert!(remotes.len() >= 2, "got {remotes:?}");
+    assert_ne!(remotes[0], remotes[1], "remote socket path was reused");
+
+    r.signal(libc::SIGTERM);
+    r.wait_for_exit();
+}
+
+#[test]
 fn a_clean_exit_stops_rash() {
     let s = Scratch::new("clean");
     let mut r = Rash::new(&s)
@@ -410,7 +505,7 @@ fn sigusr1_restarts_ssh_without_stopping_rash() {
 }
 
 #[test]
-fn d11_a_child_that_ignores_sigterm_is_killed() {
+fn a_child_that_ignores_sigterm_is_killed() {
     // autossh blocks in waitpid() here for ever; its own source comment
     // questions the design. rash escalates to SIGKILL after RASH_KILL_TIMEOUT.
     let s = Scratch::new("hang");
@@ -429,6 +524,106 @@ fn d11_a_child_that_ignores_sigterm_is_killed() {
 
     std::thread::sleep(Duration::from_millis(200));
     assert!(!alive(ssh), "the wedged ssh {ssh} survived");
+}
+
+#[test]
+fn a_relative_ssh_path_survives_daemonising() {
+    // daemonize() chdirs to /, so a relative path left to be resolved after the
+    // fork points nowhere. It used to be pinned down for the pid file and the
+    // log but not for ssh itself, which made `AUTOSSH_PATH=./ssh` work in the
+    // foreground and fail under -f.
+    let s = Scratch::new("relpath");
+    std::os::unix::fs::symlink(FAKE_SSH, s.path("fake-ssh")).expect("link the fake ssh");
+    let pid_file = s.path("rash.pid");
+
+    let mut r = Rash::new(&s)
+        .env("RASH_SSH_PATH", "./fake-ssh")
+        .env("AUTOSSH_PIDFILE", &pid_file)
+        // A backstop, so a failure cannot leave a daemon running for ever.
+        .env("AUTOSSH_MAXLIFETIME", "30")
+        .cwd(&s.dir)
+        .args(&["-M", "0", "-fN", "host"])
+        .spawn();
+
+    // The pre-fork parent leaves at once; the daemon is what has to find ssh.
+    assert_eq!(r.wait_for_exit().code(), Some(0));
+    r.wait_until("the daemon to start ssh", |r| r.starts() == 1);
+
+    let daemon: i32 = fs::read_to_string(&pid_file)
+        .expect("read pid file")
+        .trim()
+        .parse()
+        .expect("pid file should hold a number");
+    // SAFETY: signalling a process we started and have not yet seen exit.
+    unsafe { libc::kill(daemon, libc::SIGTERM) };
+    r.wait_until("the daemon to exit", |_| !pid_file.exists());
+}
+
+#[test]
+fn a_bare_ssh_name_is_still_found_on_the_path() {
+    // The counterpart to the test above: execvp only skips PATH when the name
+    // contains a slash, so pinning a bare `fake-ssh` to the working directory
+    // would break the PATH lookup it is supposed to get.
+    let s = Scratch::new("pathlookup");
+    std::os::unix::fs::symlink(FAKE_SSH, s.path("fake-ssh")).expect("link the fake ssh");
+
+    let mut r = Rash::new(&s)
+        .env("RASH_SSH_PATH", "fake-ssh")
+        .env("PATH", s.dir.to_str().expect("ascii scratch path"))
+        .env("FAKE_SSH_MODE", "exit")
+        .env("FAKE_SSH_EXIT_CODES", "0")
+        .env("AUTOSSH_GATETIME", "0")
+        .args(&["-M", "0", "-N", "host"])
+        .spawn();
+
+    assert_eq!(r.wait_for_exit().code(), Some(0));
+    assert_eq!(r.starts(), 1, "ssh should have been found on PATH");
+}
+
+#[test]
+fn the_first_poll_delay_applies_to_every_session_not_just_the_first() {
+    // `watch()` builds a fresh interval per ssh start, so a restarted session
+    // gets the same head start as the original.
+    //
+    // This is autossh's behaviour too, though its manual's wording ("before
+    // the first connection test") reads both ways: ssh_watch() is called once
+    // per session from ssh_run()'s loop (autossh.c:761), and its
+    // `my_poll_time` is a local initialised to first_poll_time on entry
+    // (autossh.c:787) and only then dropped to poll_time (autossh.c:818).
+    // ssh_run() clears the alarm between sessions, so the `secs_left == 0`
+    // branch at autossh.c:815 picks first_poll_time up again every time.
+    let s = Scratch::new("firstpoll");
+    let mut r = Rash::new(&s)
+        .env("AUTOSSH_FIRST_POLL", "4")
+        .env("AUTOSSH_POLL", "1")
+        // -M 0 keeps this pure timer arithmetic: the tick still fires and still
+        // logs, but there is no probe to add time of its own.
+        .args(&["-M", "0", "-N", "host"])
+        .spawn();
+
+    let polls = |r: &Running| r.log().matches("check on child").count();
+
+    r.wait_until("the first ssh", |r| r.starts() == 1);
+    // Restart well inside the 4s delay, so any poll seen from here belongs to
+    // the second session.
+    r.signal(libc::SIGUSR1);
+    r.wait_until("the second ssh", |r| r.starts() == 2);
+    let before = polls(&r);
+
+    // Were the delay reset to the 1s poll interval on restart, two seconds
+    // would be more than enough to see one.
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        polls(&r),
+        before,
+        "the restarted session polled before its first-poll delay was up\nlog:\n{}",
+        r.log()
+    );
+
+    r.wait_until("the restarted session's first poll", |r| polls(r) > before);
+
+    r.signal(libc::SIGTERM);
+    r.wait_for_exit();
 }
 
 #[test]

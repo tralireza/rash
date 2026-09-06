@@ -5,6 +5,7 @@ use rash::config::{self, Config};
 use rash::monitor::{Monitor, probe};
 use std::ffi::OsString;
 use std::net::TcpListener as StdTcpListener;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
@@ -250,6 +251,52 @@ async fn the_unix_sockets_are_removed_on_exit() {
         !u.local_in.exists(),
         "the listener socket must be removed on exit"
     );
+}
+
+#[tokio::test]
+async fn a_missing_socket_directory_is_created_private() {
+    // The default lives in a world-writable /tmp, so the mode goes in the
+    // mkdir(2) call rather than a chmod after it — otherwise the umask decides
+    // what the directory looks like for the moment in between.
+    let dir = PathBuf::from(format!("/tmp/rash-t{}-mkdir", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(dir.clone());
+
+    let cfg = config_with("unix", &[("RASH_SOCKET_DIR", dir.to_str().expect("ascii"))]);
+    let monitor = Monitor::bind(&cfg).await.expect("bind the monitor");
+
+    let mode = std::fs::metadata(&dir).expect("stat").permissions().mode();
+    assert_eq!(mode & 0o777, 0o700, "got {:o}", mode & 0o777);
+
+    drop(monitor);
+}
+
+#[tokio::test]
+async fn a_socket_directory_owned_by_someone_else_is_refused() {
+    // The default path is derived from the uid and so is guessable. A directory
+    // another user controls would let them answer probes, which would report a
+    // dead tunnel as healthy — the one failure the monitor exists to catch.
+    //
+    // /tmp itself stands in for the hostile directory: it exists, and on both
+    // Linux and macOS it belongs to root, so any test not running as root sees
+    // exactly the case being guarded against.
+    // SAFETY: getuid takes no arguments and only reads the calling process.
+    if unsafe { libc::getuid() } == 0 {
+        return; // as root every directory is ours; nothing to assert
+    }
+
+    let cfg = config_with("unix", &[("RASH_SOCKET_DIR", "/tmp")]);
+    let Err(e) = Monitor::bind(&cfg).await else {
+        panic!("a socket directory owned by another user should be refused");
+    };
+    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "got {e:?}");
+    assert!(e.to_string().contains("belongs to uid"), "got {e}");
 }
 
 #[tokio::test]

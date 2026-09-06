@@ -260,11 +260,6 @@ pub fn splice_forwards(args: &mut Vec<OsString>, at: usize, forwards: Vec<OsStri
     args.splice(at..at, forwards);
 }
 
-/// Insert the monitor forwards at the position `-M` occupied.
-pub fn inject_forwards(inv: &mut Invocation, forwards: Vec<OsString>) {
-    splice_forwards(&mut inv.ssh_args, inv.inject_at, forwards);
-}
-
 /// Render an argv the way a shell would need it written, for `--dry-run`.
 pub fn quote(arg: &OsStr) -> String {
     let s = arg.to_string_lossy();

@@ -23,6 +23,8 @@
 .Nm
 .Fl -list
 .Op Fl -config Ar path
+.Nm
+.Fl -help | Fl -version
 .Sh DESCRIPTION
 .Nm
 starts a copy of
@@ -86,6 +88,16 @@ handles this itself and does not pass it to ssh, so ssh cannot prompt for a
 password or passphrase.
 Implies a gate time of 0; see
 .Ev AUTOSSH_GATETIME .
+.Pp
+Backgrounding changes the working directory to
+.Pa / ,
+as
+.Xr daemon 3
+does.
+The path to ssh, the pid file and the log file are resolved before that
+happens, so a relative one still means what it did on the command line;
+relative paths inside the ssh arguments themselves are ssh's to resolve, and
+it will not see them the same way.
 .It Fl V
 Print the version and exit.
 .It Fl -dry-run
@@ -115,6 +127,11 @@ needed on the command line.
 Read this configuration file rather than the default.
 .It Fl -list
 List the sessions the configuration file defines, and exit.
+.It Fl -help
+Print a usage summary and exit.
+.It Fl -version
+As
+.Fl V .
 .El
 .Pp
 Every other option is passed to ssh untouched, including options
@@ -263,8 +280,12 @@ spelling.
 .It Ev AUTOSSH_DEBUG
 If set, log at maximum verbosity and mirror everything to standard error.
 .It Ev AUTOSSH_FIRST_POLL
-Seconds before the first connection test.
-Defaults to the poll time.
+Seconds before the first connection test
+.Em of each ssh session ,
+so a restarted session is given the same head start as the original, as in
+autossh.
+Defaults to the poll time, which makes the distinction invisible unless the
+two are set differently.
 .It Ev AUTOSSH_GATETIME
 Seconds ssh must stay up before the connection counts as established.
 Default 30.
@@ -337,6 +358,13 @@ Defaults to
 .Ev XDG_RUNTIME_DIR ,
 or
 .Pa /tmp/rash-<uid> .
+Created mode 0700 if missing; if it already exists it must be owned by the
+user running
+.Nm ,
+which is refused otherwise.
+The default path is derived from the uid and so is guessable, and a directory
+another user controls would let them answer probes and make a dead tunnel
+look healthy.
 .It Ev RASH_TOUCH_PIDFILE
 If set, update the pid file's modification time at every poll, so a watchdog
 can see the supervisor is alive.
@@ -367,7 +395,80 @@ message  = "homelab"
 Run it with
 .Nm
 .Fl -session Cm homelab .
+.Ss Keys
+Both
+.Bq defaults
+and
+.Bq session . Ns Ar name
+take the same keys, all optional.
+An unrecognised key is an error rather than a setting that quietly does
+nothing, so this list is exhaustive.
 .Pp
+A key is its environment variable with the prefix removed and lowercased,
+which is why some run together and some do not.
+.Bl -tag -width "monitor_host" -compact
+.It Cm monitor
+Monitor spec: a port number, or
+.Qq Ar port : Ns Ar echo_port ,
+.Qq Cm unix ,
+or
+.Cm 0 .
+As
+.Fl -monitor .
+.It Cm ssh_args
+Array of strings passed to ssh.
+The only key with no environment counterpart.
+.It Cm ssh_path
+As
+.Ev AUTOSSH_PATH .
+.It Cm poll
+As
+.Ev AUTOSSH_POLL .
+.It Cm first_poll
+As
+.Ev AUTOSSH_FIRST_POLL .
+.It Cm gatetime
+As
+.Ev AUTOSSH_GATETIME .
+.It Cm maxstart
+As
+.Ev AUTOSSH_MAXSTART .
+.It Cm maxlifetime
+As
+.Ev AUTOSSH_MAXLIFETIME .
+.It Cm message
+As
+.Ev AUTOSSH_MESSAGE .
+.It Cm pidfile
+As
+.Ev AUTOSSH_PIDFILE .
+.It Cm loglevel
+As
+.Ev AUTOSSH_LOGLEVEL .
+.It Cm log
+As
+.Ev RASH_LOG .
+.It Cm log_format
+As
+.Ev RASH_LOG_FORMAT .
+.It Cm monitor_host
+As
+.Ev RASH_MONITOR_HOST .
+.It Cm kill_timeout
+As
+.Ev RASH_KILL_TIMEOUT .
+.El
+.Pp
+.Ev AUTOSSH_DEBUG
+and
+.Ev RASH_TOUCH_PIDFILE
+have no key: both are switches for one run rather than settings for a tunnel.
+Neither are
+.Ev RASH_SOCKET_DIR
+and
+.Ev RASH_REMOTE_SOCKET_DIR ,
+which describe the machine rather than the connection.
+.Ss Precedence
 The file is the lowest layer of the precedence stack, above only the
 built-in defaults.
 Highest first: a command-line flag, then
@@ -382,6 +483,18 @@ The monitor port inverts the top two rungs, because autossh documents
 .Ev AUTOSSH_PORT
 as overriding
 .Fl M .
+.Pp
+.Bq defaults
+applies to
+.Em every
+run, including one that names no session.
+A configuration file therefore changes what a bare
+.Nm
+.Fl M Ar port Ar host
+does, which is worth knowing when moving from autossh, since autossh has no
+configuration file at all and so no equivalent action at a distance.
+.Fl -config Pa /dev/null
+ignores the file for a single run.
 .Sh FILES
 .Bl -tag -width Ds
 .It Pa ~/.rash.toml
@@ -431,7 +544,14 @@ variables need no changes.
 .Ev AUTOSSH_NTSERVICE
 is the only one dropped, along with Cygwin support.
 .Pp
-Three behaviours differ deliberately.
+One thing has no autossh equivalent to match: a
+.Bq defaults
+block in the configuration file applies to every run, so it can change what
+an unmodified wrapper script does.
+See
+.Sx CONFIGURATION FILE .
+.Pp
+Four behaviours differ deliberately.
 .Bl -bullet -width Ds
 .It
 A child that ignores
@@ -440,8 +560,11 @@ is escalated to
 .Dv SIGKILL .
 autossh waits for it indefinitely.
 .It
-The monitor makes three probe attempts.
-autossh configures three but performs two.
+The monitor makes three probe attempts, pausing a tenth of the network
+timeout — at most a second — between them.
+autossh configures three attempts but performs two, back to back.
+Without a pause the retries are worth little: a refused connection fails in
+microseconds, so all three finish before anything transient could clear.
 .It
 Numbers are read in base 10.
 autossh passes base 0 to
@@ -449,6 +572,14 @@ autossh passes base 0 to
 so it reads
 .Fl M Cm 020000
 as octal.
+.It
+The rejection of a bad echo port reads
+.Dq invalid echo port \(dq7\(dq
+with one space.
+autossh has two.
+Cosmetic, and deliberately not bug-compatible: it is a startup rejection
+written to standard error before any log sink exists, so nothing parsing
+logs ever sees it.
 .El
 .Pp
 Everything else that differs is a bug fix.

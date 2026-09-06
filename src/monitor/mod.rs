@@ -23,9 +23,8 @@ use std::fs;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::time::timeout;
@@ -36,6 +35,16 @@ use tokio::time::timeout;
 /// an immediate `if (tries >= 3) break` at the top (autossh.c:1285-1292). rash
 /// makes all three attempts.
 const MAX_TRIES: u32 = 3;
+
+/// How long to pause between probe attempts, as a fraction of the net timeout.
+///
+/// Without a pause the retries are worthless in the case that most needs them:
+/// a refused connection fails in microseconds, so three attempts finish in less
+/// time than one round trip and nothing transient has a chance to clear. Scaled
+/// rather than fixed so a short poll interval keeps a short total probe budget,
+/// and capped so a long one does not sit idle.
+const RETRY_PAUSE_DIVISOR: u32 = 10;
+const RETRY_PAUSE_MAX: Duration = Duration::from_secs(1);
 
 /// Whatever the monitor listens on, held for the whole run.
 enum Inbound {
@@ -49,7 +58,6 @@ pub struct Monitor {
     host: IpAddr,
     unix: Option<UnixPaths>,
     inbound: Option<Inbound>,
-    starts: AtomicU64,
 }
 
 impl Monitor {
@@ -85,7 +93,6 @@ impl Monitor {
             host: cfg.monitor_host,
             unix: cfg.unix.clone(),
             inbound,
-            starts: AtomicU64::new(0),
         })
     }
 
@@ -113,8 +120,6 @@ impl Monitor {
     /// server — which a client cannot override. Without a fresh path, rash
     /// would restart for ever against a forward that could never come up.
     pub fn next_forwards(&self) -> Vec<OsString> {
-        self.starts.fetch_add(1, Ordering::Relaxed);
-
         // ssh binds the outbound socket itself, so clear any leftover first.
         if let Some(u) = &self.unix {
             let _ = fs::remove_file(&u.local_out);
@@ -136,12 +141,17 @@ impl Monitor {
     /// Send a probe and wait for it to come back. `false` means the tunnel is
     /// not carrying traffic and ssh should be restarted.
     pub async fn probe(&self, cfg: &Config) -> bool {
+        let pause = (cfg.net_timeout / RETRY_PAUSE_DIVISOR).min(RETRY_PAUSE_MAX);
+
         for attempt in 1..=MAX_TRIES {
             if self.attempt(cfg).await {
                 log_debug!("connection ok");
                 return true;
             }
             log_debug!("monitor attempt {attempt} of {MAX_TRIES} failed");
+            if attempt < MAX_TRIES {
+                tokio::time::sleep(pause).await;
+            }
         }
         log_info!("tried connection {MAX_TRIES} times and failed");
         false
@@ -234,18 +244,44 @@ impl Drop for Monitor {
 
 /// Create the socket's directory if it is missing, readable by nobody else.
 ///
-/// Only a directory rash creates is re-permissioned; an existing one is left
-/// alone, so pointing `RASH_SOCKET_DIR` at something shared cannot lock other
-/// users out of it.
+/// Created with the mode in the `mkdir(2)` call rather than chmod-ed afterwards,
+/// so it is never briefly world-readable — the default `/tmp/rash-<uid>` sits in
+/// a world-writable directory, and the umask decides what `create_dir_all`
+/// alone would leave behind.
+///
+/// An existing directory is left as it is, so pointing `RASH_SOCKET_DIR` at
+/// something shared cannot lock other users out of it — but it must belong to
+/// us. The default path is derived from the uid and therefore guessable, so
+/// another local user can create it first; binding our sockets inside a
+/// directory they control would let them answer probes and report a wedged
+/// tunnel as healthy.
 fn prepare_socket_dir(sock: &Path) -> io::Result<()> {
     let Some(dir) = sock.parent() else {
         return Ok(());
     };
-    if dir.exists() {
-        return Ok(());
+
+    match fs::metadata(dir) {
+        Ok(md) => {
+            // SAFETY: getuid always succeeds and reads no memory.
+            let me = unsafe { libc::getuid() };
+            if md.uid() != me {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "socket directory {} belongs to uid {}, not to us ({me})",
+                        dir.display(),
+                        md.uid()
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir),
+        Err(e) => Err(e),
     }
-    fs::create_dir_all(dir)?;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
 async fn connect_tcp(addr: SocketAddr, net: Duration) -> Option<TcpStream> {

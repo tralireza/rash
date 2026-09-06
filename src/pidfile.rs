@@ -7,6 +7,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process;
 use std::time::SystemTime;
 
 #[derive(Debug)]
@@ -37,14 +38,22 @@ impl PidFile {
             .open(&self.path)?
             .set_modified(SystemTime::now())
     }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
 }
 
 impl Drop for PidFile {
+    /// Remove the file, but only while it is still ours.
+    ///
+    /// Nothing stops a second rash being pointed at the same path: it truncates
+    /// the file and writes its own pid, and without this check the first one to
+    /// exit would then delete the *survivor's* pid file, leaving a live
+    /// supervisor that no watchdog can find.
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let ours = fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .is_some_and(|pid| pid == process::id());
+        if ours {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }

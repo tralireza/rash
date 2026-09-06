@@ -59,6 +59,10 @@ fn hostname() -> String {
         uts
     };
 
+    // `c_char` is i8 on x86-64 and on every Apple target, but u8 on aarch64
+    // Linux, where clippy would otherwise call this cast unnecessary. It is
+    // needed on the platforms where it is needed.
+    #[allow(clippy::unnecessary_cast)]
     let bytes: Vec<u8> = uts
         .nodename
         .iter()

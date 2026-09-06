@@ -59,8 +59,9 @@ fn forwards_are_injected_where_dash_m_stood() {
     assert_eq!(split(&["-N", "-q", "-M", "20000", "host"]).inject_at, 2);
 
     let mut inv = split(&["-N", "-M", "20000", "host"]);
-    cli::inject_forwards(
-        &mut inv,
+    cli::splice_forwards(
+        &mut inv.ssh_args,
+        inv.inject_at,
         ["-L", "20000:127.0.0.1:20000", "-R", "20000:127.0.0.1:20001"]
             .iter()
             .map(OsString::from)

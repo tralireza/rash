@@ -73,9 +73,13 @@ default. ssh has no long options at all, which is what makes `--xxx` a safe exte
 
 | | autossh | rash |
 |---|---|---|
-| Monitor probe attempts | 3 configured, 2 actually performed (off-by-one) | 3 |
+| Monitor probe attempts | 3 configured, 2 actually performed (off-by-one), back to back | 3, pausing a tenth of the net timeout (max 1s) between them |
 | Killing a wedged child | `SIGTERM`, then wait forever | `SIGTERM`, wait `RASH_KILL_TIMEOUT` (5s), then `SIGKILL` |
 | Numeric arguments | `strtoul` base 0, so `-M 020000` is read as octal 8192 | base 10 always, so `-M 020000` is 20000 |
+| Bad echo port message | `invalid echo port··"7"` — two spaces (autossh.c:348) | one space |
+
+The last one is cosmetic and deliberately not bug-compatible: it is a startup rejection
+written to stderr before any log sink exists, so no log parser sees it.
 
 Everything else that differs is a bug fix — notably, autossh strips `f` from arguments
 that appear *after* `--`, so `autossh -M 0 host -- cmd -flag` hands ssh `-lag`; rash stops
@@ -145,9 +149,31 @@ poll     = 60
 rash --session homelab      # rash --list shows what is defined
 ```
 
+Both blocks take the same keys, all optional. An unrecognised key is an error rather
+than a setting that quietly does nothing, so this list is exhaustive — each is its
+environment variable with the prefix dropped and lowercased, which is why some run
+together and some do not:
+
+| | |
+|---|---|
+| `monitor` | as `--monitor` |
+| `ssh_args` | array of strings; the only key with no variable |
+| `ssh_path` `poll` `first_poll` `gatetime` | as `AUTOSSH_PATH` `_POLL` `_FIRST_POLL` `_GATETIME` |
+| `maxstart` `maxlifetime` `message` `pidfile` | as `AUTOSSH_MAXSTART` `_MAXLIFETIME` `_MESSAGE` `_PIDFILE` |
+| `loglevel` `log` `log_format` | as `AUTOSSH_LOGLEVEL`, `RASH_LOG`, `RASH_LOG_FORMAT` |
+| `monitor_host` `kill_timeout` | as `RASH_MONITOR_HOST` `_KILL_TIMEOUT` |
+
+`AUTOSSH_DEBUG` and `RASH_TOUCH_PIDFILE` have no key: they are switches for one run,
+not settings for a tunnel.
+
 The file is the **lowest** layer of the precedence stack, above only the built-in
 defaults: a flag beats `RASH_*`, which beats `AUTOSSH_*`, which beats `[session.<name>]`,
 which beats `[defaults]`. Anything the file can set is also settable the old way.
+
+One caveat worth knowing before you write one: **`[defaults]` applies to every run**,
+including runs that name no session, so a config file changes what a bare
+`rash -M 20000 host` does. autossh has no config file and so no equivalent action at a
+distance. `--config /dev/null` ignores yours for a single run.
 
 ### Structured logs
 

@@ -15,9 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Stable, not nightly: rustfmt.toml sets only `edition`, which stable has
+      # handled since 1.85. Formatting on nightly means an unrelated nightly
+      # can turn CI red on code nobody touched.
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          toolchain: stable
           components: rustfmt
       - run: cargo fmt --all -- --check
 
@@ -26,7 +29,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        toolchain: [stable, nightly]
+        # The MSRV is in the matrix so `rust-version` in Cargo.toml stays a
+        # fact rather than an aspiration.
+        toolchain: [stable, nightly, "1.88"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -39,5 +44,14 @@ jobs:
       # only. As a global RUSTFLAGS it would also deny warnings in every
       # dependency, and a new lint in a newer compiler would then fail the
       # build for code that is not ours.
+      #
+      # Clippy is skipped on the MSRV row: its lints move with the compiler, so
+      # pinning an old one only tests which lints existed in 1.88.
       - run: cargo clippy --all-targets --all-features -- -D warnings
+        if: matrix.toolchain != '1.88'
       - run: cargo test --all-targets
+      # --all-targets silently excludes doctests, so they need their own run.
+      - run: cargo test --doc
+      # The install path the README documents. Nothing else in CI builds
+      # without the default features, so nothing else would notice it breaking.
+      - run: cargo build --no-default-features

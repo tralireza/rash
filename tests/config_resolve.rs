@@ -100,6 +100,54 @@ fn max_lifetime_clamps_both_poll_times() {
 }
 
 #[test]
+fn an_enormous_poll_time_does_not_overflow_the_timeout_clamp() {
+    // `poll * 1000 / 2` overflowed u64 here: a debug build panicked, and a
+    // release build wrapped to a 192ms network timeout while warning about a
+    // "short poll time" for an interval of half a trillion years.
+    let huge = (u64::MAX / 1000 + 1).to_string();
+    let r = resolve(&["-M", "1", "host"], &[("AUTOSSH_POLL", &huge)]);
+    assert_eq!(secs(r.config.poll), u64::MAX / 1000 + 1);
+    assert_eq!(
+        r.config.net_timeout,
+        Duration::from_millis(15_000),
+        "a long poll must leave the default timeout alone"
+    );
+    assert!(r.warnings.is_empty(), "got {:?}", r.warnings);
+
+    // The saturating multiply must not break the clamp it guards.
+    let r = resolve(&["-M", "1", "host"], &[("AUTOSSH_POLL", "10")]);
+    assert_eq!(r.config.net_timeout, Duration::from_millis(5_000));
+}
+
+#[test]
+fn touch_pidfile_reads_its_value() {
+    // It used to be presence-based, so RASH_TOUCH_PIDFILE=0 turned it *on*.
+    // AUTOSSH_DEBUG stays presence-based, because autossh's is.
+    for on in ["1", "true", "yes", "on", "TRUE"] {
+        let c = resolve(&["-M", "0", "host"], &[("RASH_TOUCH_PIDFILE", on)]).config;
+        assert!(c.touch_pid_file, "{on:?} should enable it");
+    }
+    for off in ["0", "false", "no", "off", ""] {
+        let c = resolve(&["-M", "0", "host"], &[("RASH_TOUCH_PIDFILE", off)]).config;
+        assert!(!c.touch_pid_file, "{off:?} should not enable it");
+    }
+    assert!(!resolve(&["-M", "0", "host"], &[]).config.touch_pid_file);
+
+    match try_resolve(&["-M", "0", "host"], &[("RASH_TOUCH_PIDFILE", "maybe")]) {
+        Err(ConfigError::Invalid(m)) => assert!(m.contains("touch pidfile"), "got {m:?}"),
+        other => panic!("expected a rejection, got {other:?}"),
+    }
+
+    // Unchanged: autossh's own switch is set-or-not, whatever the value.
+    assert!(
+        resolve(&["-M", "0", "host"], &[("AUTOSSH_DEBUG", "0")])
+            .config
+            .log
+            .also_stderr
+    );
+}
+
+#[test]
 fn rash_variables_outrank_autossh_ones() {
     let c = resolve(
         &["-M", "1", "host"],
@@ -250,8 +298,11 @@ fn rejections() {
 
     bad(&["-M", "65535", "host"], &[], "out of range");
     bad(&["-M", "abc", "host"], &[], "invalid port");
-    bad(&["-M", "20000:0", "host"], &[], "invalid echo port");
-    bad(&["-M", "20000:x", "host"], &[], "invalid echo port");
+    // One space, where autossh.c:348 has two — a deliberate divergence, so
+    // asserted exactly. Restoring autossh's spacing has to fail this test
+    // rather than pass unnoticed in either direction.
+    bad(&["-M", "20000:0", "host"], &[], "invalid echo port \"0\"");
+    bad(&["-M", "20000:x", "host"], &[], "invalid echo port \"x\"");
     bad(
         &["-M", "1", "host"],
         &[("AUTOSSH_POLL", "0")],
@@ -386,6 +437,26 @@ fn an_unknown_session_names_the_ones_that_exist() {
         }
         other => panic!("expected a rejection, got {other:?}"),
     }
+}
+
+#[test]
+fn a_bad_monitor_key_says_what_was_wanted() {
+    // An untagged enum reported this as "data did not match any variant of
+    // untagged enum Spec", which tells nobody what to write instead.
+    let e = rash::settings::parse("[session.x]\nmonitor = -1\n").expect_err("should be rejected");
+    assert!(e.contains("monitor port"), "got {e:?}");
+    assert!(e.contains("unix"), "should name the alternatives: {e:?}");
+
+    // The forms that are valid still are.
+    for text in ["monitor = 20000", "monitor = \"20000:7\"", "monitor = 0"] {
+        let f = rash::settings::parse(&format!("[session.x]\n{text}\n"))
+            .unwrap_or_else(|e| panic!("{text} should parse: {e}"));
+        assert!(f.session_names().contains(&"x"));
+    }
+
+    // And a mistyped key is still a hard error rather than a silent no-op.
+    let e = rash::settings::parse("[defaults]\ngate_time = 5\n").expect_err("should be rejected");
+    assert!(e.contains("gate_time"), "got {e:?}");
 }
 
 #[test]
