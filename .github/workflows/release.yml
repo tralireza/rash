@@ -94,7 +94,12 @@ jobs:
 
   publish:
     # Skipped on a manual run: that is the rehearsal, and it stops here.
-    if: startsWith(github.ref, 'refs/tags/')
+    #
+    # The test is on the event, not the ref. workflow_dispatch can be pointed at
+    # a tag, which makes `startsWith(github.ref, 'refs/tags/')` true — so the
+    # ref-shaped guard this replaces let a rehearsal run the real publish, and
+    # `gh release create` then failed against a release that already existed.
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     permissions:
