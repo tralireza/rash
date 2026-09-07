@@ -2,6 +2,12 @@
 //!
 //! These are the tests autossh never had. Everything runs locally in a scratch
 //! directory, with no network, no keys, and no remote host.
+//!
+//! The stand-in is built by the `test-harness` feature, which is off by default
+//! because it is a second binary. So this file needs `cargo test
+//! --all-features`; without it the whole file compiles away, rather than
+//! failing on a `CARGO_BIN_EXE_fake-ssh` that Cargo never set.
+#![cfg(feature = "test-harness")]
 
 use std::ffi::OsStr;
 use std::fs;

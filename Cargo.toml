@@ -1,6 +1,9 @@
 [package]
-name = "rash"
-version = "0.1.0"
+# crates.io has had an unrelated `rash` — a file hasher — since 2018, and
+# `rash_core` and `rash-shell` are live in the same namespace. Only the package
+# is renamed: the binary and the library both keep the short name.
+name = "rash-ssh"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.88"   # let-chains
 description = "Rust Auto SSH — start an ssh session or tunnel, monitor it, and restart it when it dies or stops passing traffic"
@@ -8,14 +11,20 @@ repository = "https://github.com/tralireza/rash"
 license = "MIT"
 keywords = ["ssh", "tunnel", "autossh", "supervisor"]
 categories = ["command-line-utilities", "network-programming"]
-# GitHub-only for now; see the plan's "Open items".
-publish = false
 
 [features]
-default = ["test-harness"]
-# The fake-ssh stand-in used by the end-to-end tests. On by default so
-# `cargo test` works unconfigured; turn it off to install just `rash`.
+default = []
+# The fake-ssh stand-in used by the end-to-end tests. Off by default because
+# `cargo install` installs every binary a package declares, so leaving it on
+# would put a fake ssh server on the PATH of everyone who installs rash.
+# `cargo test --all-features` is the entry point that runs the e2e suite.
 test-harness = []
+
+# Without this the library would follow the package to `rash_ssh`, and the six
+# files that say `use rash::…` would all have to change for no reason a reader
+# could guess at.
+[lib]
+name = "rash"
 
 [[bin]]
 name = "rash"

@@ -94,8 +94,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "rash"
-version = "0.1.0"
+name = "rash-ssh"
+version = "0.1.1"
 dependencies = [
  "libc",
  "serde",

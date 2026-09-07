@@ -66,10 +66,10 @@ jobs:
       # Deliberately uncached, unlike ci.yml: a published binary is worth the
       # few extra minutes of building from scratch.
       #
-      # --no-default-features is the load-bearing flag here. The default feature
-      # set includes `test-harness`, which builds fake-ssh — the ssh stand-in
-      # the tests drive. It is on by default so `cargo test` works unconfigured,
-      # and it has no business in a release tarball.
+      # The default feature set is empty, so --no-default-features changes
+      # nothing today. It stays as a latch: `test-harness` builds fake-ssh, the
+      # ssh stand-in the tests drive, and this keeps it out of a release tarball
+      # even if it is ever put back in the defaults.
       - name: Build
         run: >
           cargo build --release --locked --no-default-features

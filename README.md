@@ -1,4 +1,5 @@
 [![CI](https://github.com/tralireza/rash/actions/workflows/ci.yml/badge.svg)](https://github.com/tralireza/rash/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/rash-ssh.svg)](https://crates.io/crates/rash-ssh)
 
 # rash — Rust Auto SSH
 
@@ -188,6 +189,15 @@ default text format is byte-identical to autossh's, so existing log parsing is u
 ## Building and installing
 
 ```sh
+cargo install rash-ssh
+```
+
+The crate is **`rash-ssh`** because crates.io has had an unrelated `rash` — a file
+hashing tool — since 2018. The binary it installs is `rash`, and nothing else about the
+rename is visible. `cargo install` places no manual page, so take `rash.1` from a release
+tarball or from a checkout:
+
+```sh
 cargo build --release
 
 install -d ~/.local/share/man/man1
@@ -206,8 +216,8 @@ man ./rash.1
 ```
 
 No nightly features are used; stable and nightly are both tested in CI, on Linux and
-macOS. `cargo install --path . --no-default-features` omits the test harness binary and
-builds only `rash`.
+macOS. The end-to-end tests need the `test-harness` feature, off by default because it
+builds a second binary that has no business on anyone's PATH: `cargo test --all-features`.
 
 ## Credits
 
