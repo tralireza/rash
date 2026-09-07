@@ -15,19 +15,25 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-usage: rash [-V] [-M monitor_port[:echo_port]] [-f] [SSH_OPTIONS]
+usage: rash [-V] [-M monitor_port[:echo_port]] [-f] [--dry-run]
+            [--monitor SPEC] [SSH_OPTIONS]
+       rash --session NAME [--config PATH]
+       rash --list [--config PATH]
+       rash --help | --version
 
     -M  monitor port. May be overridden by AUTOSSH_PORT (or RASH_PORT).
         0 turns the monitoring loop off. Alternatively a port for an echo
-        service on the remote machine may be given (normally port 7).
+        service on the remote machine may be given (normally port 7), or
+        `unix`, though --monitor reads better for that.
     -f  run in background. rash handles this itself and does not pass it
         to ssh. Implies a gate time of 0.
     -V  print version and exit.
 
     --dry-run       print the ssh command and resolved settings, then exit.
-    --monitor SPEC  as -M, but takes precedence over it. Also accepts `unix`,
-                    which runs the monitor loop over UNIX-domain sockets so
-                    there are no ports to pick on either machine.
+    --monitor SPEC  as -M, but takes precedence over it and the environment.
+                    SPEC is a port, port:echo_port, 0, or `unix` — the last
+                    runs the monitor loop over UNIX-domain sockets, so there
+                    are no monitor ports to pick on either machine.
     --session NAME  take settings from [session.NAME] in the config file.
     --config PATH   use this config file instead of the default.
     --list          list the config file's sessions and exit.

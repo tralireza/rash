@@ -11,18 +11,20 @@ Everything autossh does, plus the additions under [Beyond autossh](#beyond-autos
 ## Usage
 
 ```
-rash [-V] [-M port[:echo_port]] [-f] [SSH_OPTIONS]
+rash [-V] [-M port[:echo_port]] [-f] [--dry-run] [--monitor SPEC] [SSH_OPTIONS]
 rash --session NAME [--config PATH]
-rash --list
+rash --list [--config PATH]
+rash --help | --version
 ```
 
-Only `-M`, `-f` and `-V` belong to rash. Everything else is passed to ssh untouched.
+`-M`, `-f` and `-V` are rash's only short options, and every long option is rash's too.
+Everything else is passed to ssh untouched.
 
 ```sh
 # Keep a forward up, restarting whenever it stops carrying traffic
 rash -M 20000 -N -L 8080:localhost:80 me@host
 
-# The same, without having to find free ports on either machine
+# The same forward, with no monitor ports to find at either end
 rash --monitor unix -N -L 8080:localhost:80 me@host
 
 # Show exactly what would be executed, and with what settings, without connecting
@@ -91,14 +93,14 @@ Replace `autossh` with `rash`. That is the whole procedure — the flags, the en
 variables, the exit codes and the log lines are all the same, so wrapper scripts, systemd
 units and launchd plists need no changes.
 
-Only `AUTOSSH_NTSERVICE` is gone, along with Cygwin support. The three behaviours that
+Only `AUTOSSH_NTSERVICE` is gone, along with Cygwin support. The four behaviours that
 differ on purpose are listed above.
 
 Once you have switched, these are worth knowing about:
 
 | Instead of | Consider |
 |---|---|
-| `-M 20000`, and finding two free ports on each machine | `--monitor unix` — no ports at either end |
+| `-M 20000`, and finding two free local ports and one on the remote | `--monitor unix` — no ports at either end |
 | A wrapper script per tunnel | a `[session.<name>]` block, then `rash --session <name>` |
 | Guessing what ssh will actually receive | `rash --dry-run` |
 | `AUTOSSH_LOGFILE` and parsing text | `RASH_LOG` and `RASH_LOG_FORMAT=json` |
@@ -110,11 +112,13 @@ All opt-in. Defaults are unchanged, so none of this affects a plain `rash -M 200
 ### A monitor with no ports
 
 ```sh
-rash --monitor unix -N me@host
+rash --monitor unix -N -L 8080:localhost:80 me@host
 ```
 
-Runs the monitor loop over UNIX-domain sockets rather than TCP, so there are no ports to
-choose and none to collide — at either end.
+Runs the monitor loop over UNIX-domain sockets rather than TCP, so there are no monitor
+ports to choose and none to collide — at either end. The forward itself is unaffected:
+`-L 8080:localhost:80` above is yours, and rash adds its own `-L` and `-R` alongside it,
+as `--dry-run` will show.
 
 The remote socket path is regenerated on **every ssh start**, and that detail is
 load-bearing. `StreamLocalBindUnlink` defaults to `no` in `sshd_config` and a client
