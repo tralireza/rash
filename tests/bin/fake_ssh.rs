@@ -38,16 +38,26 @@ use std::time::Duration;
 
 fn main() {
     exit_when_orphaned();
+
+    // A child that refuses to die on SIGTERM. autossh blocks forever waiting
+    // for this one; rash is expected to escalate to SIGKILL.
+    //
+    // The disposition is installed before the start is recorded, and that
+    // order is load-bearing. The tests treat the recorded start as permission
+    // to signal, so a SIGTERM arriving before this call would kill the process
+    // outright — which looks exactly like a child that honoured it, and fails
+    // the one test that asks for a child that does not. The window is small
+    // and needs a loaded machine to lose, which made it a CI-only flake.
+    let mode = env_str("FAKE_SSH_MODE", "sleep");
+    if mode == "hang" {
+        ignore_sigterm();
+    }
+
     let start = record_start();
     start_tunnel();
 
-    match env_str("FAKE_SSH_MODE", "sleep").as_str() {
-        // A child that refuses to die on SIGTERM. autossh blocks forever waiting
-        // for this one; rash is expected to escalate to SIGKILL.
-        "hang" => {
-            ignore_sigterm();
-            sleep_forever();
-        }
+    match mode.as_str() {
+        "hang" => sleep_forever(),
         "exit" => {
             thread::sleep(Duration::from_millis(env_num("FAKE_SSH_DELAY_MS", 50)));
             std::process::exit(exit_code_for(start));
