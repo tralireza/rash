@@ -3,7 +3,7 @@
 # `rash_core` and `rash-shell` are live in the same namespace. Only the package
 # is renamed: the binary and the library both keep the short name.
 name = "rash-ssh"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.88"   # let-chains
 description = "Rust Auto SSH — start an ssh session or tunnel, monitor it, and restart it when it dies or stops passing traffic"

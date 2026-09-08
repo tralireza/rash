@@ -7,7 +7,7 @@ Start an `ssh` session or tunnel, watch it, and restart it when it dies or stops
 traffic. `rash` is a behaviour-compatible reimplementation of [autossh(1)][autossh] in Rust.
 
 Everything autossh does, plus the additions under [Beyond autossh](#beyond-autossh).
-`man ./rash.1` is the full manual.
+`man rash` is the full manual, or `rash --man` if you have the binary but not the page.
 
 ## Usage
 
@@ -186,7 +186,30 @@ distance. `--config /dev/null` ignores yours for a single run.
 whichever sink is in use. `RASH_LOG` picks that sink: `syslog`, `stderr`, or a path. The
 default text format is byte-identical to autossh's, so existing log parsing is unaffected.
 
-## Building and installing
+## Installing
+
+Three routes to the same binary. Whichever you pick, `~/.local/share/man` is on the
+default manpath on macOS and Linux, so `man rash` works afterwards with no further setup.
+Where you have the file but have not installed it, `man ./rash.1` reads it in place — the
+leading `./` is what makes both BSD and GNU `man` treat the argument as a file rather than
+a page name.
+
+### A release tarball
+
+Prebuilt for x86-64 and arm64, on Linux and macOS, under
+[Releases](https://github.com/tralireza/rash/releases). Each carries the binary and the
+manual page:
+
+```sh
+tar -xzf rash-v<version>-<target>.tar.gz
+cd rash-v<version>-<target>
+
+install -d ~/.local/bin ~/.local/share/man/man1
+install -m 755 rash    ~/.local/bin/
+install -m 644 rash.1  ~/.local/share/man/man1/
+```
+
+### crates.io
 
 ```sh
 cargo install rash-ssh
@@ -194,30 +217,33 @@ cargo install rash-ssh
 
 The crate is **`rash-ssh`** because crates.io has had an unrelated `rash` — a file
 hashing tool — since 2018. The binary it installs is `rash`, and nothing else about the
-rename is visible. `cargo install` places no manual page, so take `rash.1` from a release
-tarball or from a checkout:
+rename is visible.
+
+`cargo install` places no manual page, so the binary carries its own. `rash --man` writes
+it to standard output as mdoc source — the roff the page is written in, not formatted
+text — so send it to a manpath rather than reading it:
+
+```sh
+install -d ~/.local/share/man/man1
+rash --man > ~/.local/share/man/man1/rash.1
+```
+
+### A checkout
 
 ```sh
 cargo build --release
 
-install -d ~/.local/share/man/man1
+install -d ~/.local/bin ~/.local/share/man/man1
 install -m 755 target/release/rash  ~/.local/bin/
 install -m 644 rash.1               ~/.local/share/man/man1/
 ```
 
-`~/.local/share/man` is on the default manpath on both macOS and Linux, so `man rash`
-works from there with no further setup.
+## Development
 
-To read the manual without installing it — note the leading `./`, which is what makes both
-BSD and GNU `man` treat the argument as a file rather than a page name:
-
-```sh
-man ./rash.1
-```
-
-No nightly features are used; stable and nightly are both tested in CI, on Linux and
-macOS. The end-to-end tests need the `test-harness` feature, off by default because it
-builds a stand-in ssh that no ordinary build has any use for: `cargo test --all-features`.
+No nightly features are used. The floor is Rust 1.88 — let-chains — and 1.88, stable and
+nightly are all tested in CI, on Linux and macOS. The end-to-end tests need the
+`test-harness` feature, off by default because it builds a stand-in ssh that no ordinary
+build has any use for: `cargo test --all-features`.
 
 ## Credits
 
