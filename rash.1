@@ -3,7 +3,7 @@
 .\" Copyright (c) 2026 Alireza Torabi
 .\" Distributed under the MIT licence; see the LICENSE file.
 .\"
-.Dd September 6, 2026
+.Dd September 8, 2026
 .Dt RASH 1
 .Os
 .Sh NAME
@@ -24,7 +24,7 @@
 .Fl -list
 .Op Fl -config Ar path
 .Nm
-.Fl -help | Fl -version
+.Fl -help | Fl -man | Fl -version
 .Sh DESCRIPTION
 .Nm
 starts a copy of
@@ -129,6 +129,26 @@ Read this configuration file rather than the default.
 List the sessions the configuration file defines, and exit.
 .It Fl -help
 Print a usage summary and exit.
+.It Fl -man
+Write this manual page, in
+.Xr mdoc 7
+source form, to standard output and exit.
+The page is compiled into the binary, so it is available wherever the binary
+is.
+This matters because
+.Nm
+installed with
+.Cm cargo install
+arrives on its own:
+.Xr cargo 1
+installs binaries and has no mechanism for installing anything else.
+.Pp
+.Dl $ rash --man > ~/.local/share/man/man1/rash.1
+.Pp
+.Pa ~/.local/share/man
+is on the default manpath on both Linux and macOS, so
+.Cm man rash
+works afterwards with no further setup.
 .It Fl -version
 As
 .Fl V .

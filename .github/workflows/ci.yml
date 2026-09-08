@@ -54,6 +54,12 @@ jobs:
         if: matrix.toolchain != '1.88'
       # --all-features is what builds fake-ssh. Without it tests/e2e.rs cfgs
       # itself out and the end-to-end suite reports zero tests, in green.
-      - run: cargo test --all-features --all-targets
-      # --all-targets silently excludes doctests, so they need their own run.
-      - run: cargo test --doc
+      #
+      # Deliberately no --all-targets. It reads like it could only add
+      # coverage, and for an example it subtracts: `cargo test --all-targets`
+      # compiles the example as a test harness *instead of* building it the
+      # ordinary way, so target/<profile>/examples/fake-ssh is never written
+      # and every end-to-end test fails looking for it. It also drops the
+      # doctests, which plain `cargo test` runs. Clippy above keeps its
+      # --all-targets, where the flag does mean what it says.
+      - run: cargo test --all-features

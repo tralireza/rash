@@ -3,7 +3,7 @@
 # `rash_core` and `rash-shell` are live in the same namespace. Only the package
 # is renamed: the binary and the library both keep the short name.
 name = "rash-ssh"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"   # let-chains
 description = "Rust Auto SSH — start an ssh session or tunnel, monitor it, and restart it when it dies or stops passing traffic"
@@ -14,10 +14,9 @@ categories = ["command-line-utilities", "network-programming"]
 
 [features]
 default = []
-# The fake-ssh stand-in used by the end-to-end tests. Off by default because
-# `cargo install` installs every binary a package declares, so leaving it on
-# would put a fake ssh server on the PATH of everyone who installs rash.
-# `cargo test --all-features` is the entry point that runs the e2e suite.
+# The fake-ssh stand-in used by the end-to-end tests. Off by default so that no
+# ordinary build compiles it; `cargo test --all-features` is the entry point
+# that runs the e2e suite.
 test-harness = []
 
 # Without this the library would follow the package to `rash_ssh`, and the six
@@ -30,7 +29,13 @@ name = "rash"
 name = "rash"
 path = "src/main.rs"
 
-[[bin]]
+# An example rather than a second `[[bin]]`, because crates.io lists every
+# `[[bin]]` a package declares and ignores `required-features` when it does. So
+# the crate page told every reader that `cargo install rash-ssh` would put a
+# fake ssh server on their PATH, which was never true — Cargo honours
+# `required-features` even where the page does not. `cargo install` never
+# installs an example, and an example is not in that list to begin with.
+[[example]]
 name = "fake-ssh"
 path = "tests/bin/fake_ssh.rs"
 required-features = ["test-harness"]

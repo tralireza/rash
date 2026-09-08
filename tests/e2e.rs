@@ -4,20 +4,44 @@
 //! directory, with no network, no keys, and no remote host.
 //!
 //! The stand-in is built by the `test-harness` feature, which is off by default
-//! because it is a second binary. So this file needs `cargo test
+//! because no ordinary build has any use for it. So this file needs `cargo test
 //! --all-features`; without it the whole file compiles away, rather than
-//! failing on a `CARGO_BIN_EXE_fake-ssh` that Cargo never set.
+//! hunting for a stand-in Cargo was never asked to build.
 #![cfg(feature = "test-harness")]
 
 use std::ffi::OsStr;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 const RASH: &str = env!("CARGO_BIN_EXE_rash");
-const FAKE_SSH: &str = env!("CARGO_BIN_EXE_fake-ssh");
+
+/// The stand-in is an example rather than a `[[bin]]` — `Cargo.toml` says why —
+/// so Cargo sets no `CARGO_BIN_EXE_` variable for it. It is still uplifted
+/// beside the real binary, one directory down, for every profile and target.
+///
+/// Uplifted by `cargo test --all-features`, that is, and not by `cargo test
+/// --all-features --all-targets`: for an example, `--all-targets` asks for a
+/// test-harness build *instead of* the ordinary one, and only the ordinary one
+/// is uplifted. Hence the assertion, which is otherwise twenty identical
+/// failures with no stated cause.
+static FAKE_SSH: LazyLock<PathBuf> = LazyLock::new(|| {
+    let path = Path::new(RASH)
+        .parent()
+        .expect("the rash binary is in a directory")
+        .join("examples")
+        .join("fake-ssh");
+    assert!(
+        path.is_file(),
+        "no fake ssh at {} — this needs `cargo test --all-features`, \
+         and specifically without --all-targets",
+        path.display()
+    );
+    path
+});
 
 /// Generous enough for a loaded CI box, short enough that a hang is still a
 /// test failure rather than a coffee break.
@@ -90,7 +114,7 @@ impl Rash {
         // quietly change what is being tested.
         cmd.env_clear()
             .env("PATH", "/usr/bin:/bin")
-            .env("RASH_SSH_PATH", FAKE_SSH)
+            .env("RASH_SSH_PATH", &*FAKE_SSH)
             .env("FAKE_SSH_STATE", &state)
             .env("AUTOSSH_LOGFILE", &log)
             .env("AUTOSSH_LOGLEVEL", "7")
@@ -551,7 +575,7 @@ fn a_relative_ssh_path_survives_daemonising() {
     // log but not for ssh itself, which made `AUTOSSH_PATH=./ssh` work in the
     // foreground and fail under -f.
     let s = Scratch::new("relpath");
-    std::os::unix::fs::symlink(FAKE_SSH, s.path("fake-ssh")).expect("link the fake ssh");
+    std::os::unix::fs::symlink(&*FAKE_SSH, s.path("fake-ssh")).expect("link the fake ssh");
     let pid_file = s.path("rash.pid");
 
     let mut r = Rash::new(&s)
@@ -583,7 +607,7 @@ fn a_bare_ssh_name_is_still_found_on_the_path() {
     // contains a slash, so pinning a bare `fake-ssh` to the working directory
     // would break the PATH lookup it is supposed to get.
     let s = Scratch::new("pathlookup");
-    std::os::unix::fs::symlink(FAKE_SSH, s.path("fake-ssh")).expect("link the fake ssh");
+    std::os::unix::fs::symlink(&*FAKE_SSH, s.path("fake-ssh")).expect("link the fake ssh");
 
     let mut r = Rash::new(&s)
         .env("RASH_SSH_PATH", "fake-ssh")

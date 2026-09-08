@@ -46,6 +46,8 @@ pub struct Invocation {
     pub background: bool,
     pub version: bool,
     pub help: bool,
+    /// `--man`: write the manual page to standard output and exit.
+    pub man: bool,
     pub dry_run: bool,
     /// `--list`: print the config file's session names and exit.
     pub list: bool,
@@ -209,6 +211,10 @@ fn parse_long(inv: &mut Invocation, argv: &[OsString], i: usize) -> Result<usize
         }
         "version" => {
             inv.version = true;
+            Ok(1)
+        }
+        "man" => {
+            inv.man = true;
             Ok(1)
         }
         "dry-run" => {

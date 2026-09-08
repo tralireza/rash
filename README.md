@@ -15,7 +15,7 @@ Everything autossh does, plus the additions under [Beyond autossh](#beyond-autos
 rash [-V] [-M port[:echo_port]] [-f] [--dry-run] [--monitor SPEC] [SSH_OPTIONS]
 rash --session NAME [--config PATH]
 rash --list [--config PATH]
-rash --help | --version
+rash --help | --man | --version
 ```
 
 `-M`, `-f` and `-V` are rash's only short options, and every long option is rash's too.
@@ -217,7 +217,7 @@ man ./rash.1
 
 No nightly features are used; stable and nightly are both tested in CI, on Linux and
 macOS. The end-to-end tests need the `test-harness` feature, off by default because it
-builds a second binary that has no business on anyone's PATH: `cargo test --all-features`.
+builds a stand-in ssh that no ordinary build has any use for: `cargo test --all-features`.
 
 ## Credits
 

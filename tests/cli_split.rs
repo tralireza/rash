@@ -221,6 +221,7 @@ fn version_is_rash_s_not_ssh_s() {
 fn long_options_belong_to_rash() {
     assert!(split(&["--dry-run", "-M", "0", "host"]).dry_run);
     assert!(split(&["--help"]).help);
+    assert!(split(&["--man"]).man);
     assert!(split(&["--version"]).version);
 
     let inv = split(&["--monitor", "unix", "-N", "host"]);

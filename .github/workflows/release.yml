@@ -67,9 +67,10 @@ jobs:
       # few extra minutes of building from scratch.
       #
       # The default feature set is empty, so --no-default-features changes
-      # nothing today. It stays as a latch: `test-harness` builds fake-ssh, the
-      # ssh stand-in the tests drive, and this keeps it out of a release tarball
-      # even if it is ever put back in the defaults.
+      # nothing today, and `test-harness` now gates only an example, which
+      # `cargo build` does not build at any feature setting. Both of those could
+      # change; the flag stays as a latch so that a future optional target
+      # cannot reach a tarball just by being switched on by default.
       - name: Build
         run: >
           cargo build --release --locked --no-default-features

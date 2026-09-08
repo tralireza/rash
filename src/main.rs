@@ -14,12 +14,17 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+/// The manual page, compiled in. `cargo install` places binaries and nothing
+/// else, and has no mechanism to place anything else, so for anyone who
+/// installed rash from crates.io this is the only copy of the page in reach.
+const MANUAL: &str = include_str!("../rash.1");
+
 const USAGE: &str = "\
 usage: rash [-V] [-M monitor_port[:echo_port]] [-f] [--dry-run]
             [--monitor SPEC] [SSH_OPTIONS]
        rash --session NAME [--config PATH]
        rash --list [--config PATH]
-       rash --help | --version
+       rash --help | --man | --version
 
     -M  monitor port. May be overridden by AUTOSSH_PORT (or RASH_PORT).
         0 turns the monitoring loop off. Alternatively a port for an echo
@@ -38,6 +43,9 @@ usage: rash [-V] [-M monitor_port[:echo_port]] [-f] [--dry-run]
     --config PATH   use this config file instead of the default.
     --list          list the config file's sessions and exit.
     --help          print this message and exit.
+    --man           write the manual page to standard output and exit. It is
+                    compiled in, because `cargo install` cannot place one:
+                    rash --man > ~/.local/share/man/man1/rash.1
     --version       as -V.
 
 All other options are passed through to ssh unchanged. Long options are always
@@ -99,6 +107,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
     if inv.help {
         print!("{USAGE}");
+        return Ok(ExitCode::SUCCESS);
+    }
+    if inv.man {
+        print!("{MANUAL}");
         return Ok(ExitCode::SUCCESS);
     }
     // A missing default config file is normal — most runs are entirely command
