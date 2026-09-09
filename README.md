@@ -44,11 +44,13 @@ its own before putting `rash` in front of it.
 autossh still does its job, but it was last released in 2019 and it has aged in three
 specific ways:
 
-- **Its ssh option table has drifted from reality.** autossh validates arguments against a
-  hardcoded option string that predates current OpenSSH. On OpenSSH 10, `ssh -B
-  bind_interface` is unknown to it and `-P` is encoded as a boolean when ssh now takes
-  `-P tag` — passing either makes autossh print usage and refuse to run. Every new ssh
-  option breaks it again.
+- **Its ssh option table has drifted from reality.** autossh validates argv with
+  `getopt(3)` against a hardcoded option string (`OPTION_STRING`, autossh.c:112), then
+  rebuilds the ssh command from the raw argv anyway — so it has to know every ssh option
+  merely to pass it through. On OpenSSH 10 that string is missing `-B bind_interface`, so
+  `autossh -M 0 -B eth0 host` dies with `illegal option -- B`; and it encodes `-P` as a
+  boolean when ssh now takes `-P tag`, so `autossh -P tag -M 0 host` stops parsing before
+  its own `-M` and dies with usage. Every new ssh option breaks it again.
 - **Its control flow is `sigsetjmp`/`siglongjmp` + `alarm()` + `pause()`**, with `syslog()`
   reachable from a signal handler. Racy by construction; its CHANGES file is a decade of
   patches to that one design.

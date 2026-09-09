@@ -52,7 +52,7 @@ serde = { version = "1", features = ["derive"] }
 # Only for escaping the JSON log sink; the messages are ours, but they carry
 # paths and OS error strings that can hold quotes and backslashes.
 serde_json = "1"
-toml = "0.9"
+toml = "1"
 tokio = { version = "1", features = [
   "rt",
   "macros",
